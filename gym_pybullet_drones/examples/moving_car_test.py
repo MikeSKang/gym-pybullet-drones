@@ -257,7 +257,7 @@ if __name__ == "__main__":
     base_env = TimeLimit(base_env, max_episode_steps=2400)
 
     # 2) MovingTargetWrapper로 타겟 추가
-    env = MovingTargetWrapper(base_env, camera_size=(128, 128))
+    env = MovingTargetWrapper(base_env, camera_size=(256, 256))
 
     # 3) TextureWrapper로 바닥 텍스처 적용
     texture_file = "gym_pybullet_drones/examples/textures/floor1.jpg"  # 원하는 텍스처 파일
