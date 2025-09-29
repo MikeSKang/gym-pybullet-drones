@@ -8,6 +8,9 @@ from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewar
 # 커스텀 환경 불러오기
 from moving_car_test import make_custom_env, MovingTargetWrapper
 
+#observation mode 설정
+obs_mode = "rel_pos"
+
 if __name__ == "__main__":
     # ---------------- CUDA 선택 ----------------
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -15,7 +18,7 @@ if __name__ == "__main__":
 
     # ---------------- 환경 생성 ----------------
     def make_env():
-        return make_custom_env(gui=False, obs_mode="both")
+        return make_custom_env(gui=False, obs_mode=obs_mode)
 
     train_env = DummyVecEnv([make_env])
     train_env = VecMonitor(train_env)
@@ -23,10 +26,22 @@ if __name__ == "__main__":
     eval_env = DummyVecEnv([make_env])
     eval_env = VecMonitor(eval_env)
 
+
+    # ---------------------------
+    # Policy 자동 선택
+    # ---------------------------
+    if obs_mode == "rel_pos":
+        policy = "MlpPolicy"        # 단순 좌표 → MLP
+    elif obs_mode == "rgb":
+        policy = "CnnPolicy"        # 이미지 → CNN
+    elif obs_mode == "both":
+        policy = "MultiInputPolicy" # Dict(rgb+좌표) → MultiInput
+    else:
+        raise ValueError(f"Unknown obs_mode {obs_mode}")
     # ---------------- PPO 모델 ----------------
     # MultiInputPolicy → Dict(obs) 지원 (rgb + rel_pos)
     model = PPO(
-        policy="MultiInputPolicy",
+        policy,
         env=train_env,
         verbose=1,
         tensorboard_log="./ppo_drone_tensorboard_multi/",       #terminal: tensorboard --logdir ./ppo_drone_tensorboard_multi/
