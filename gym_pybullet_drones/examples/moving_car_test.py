@@ -55,8 +55,7 @@ class BoundaryWrapper(gym.Wrapper):
 
         reward += boundary_penalty
 
-        # 하드 종료는 없애고, TimeLimit만 사용
-        return obs, reward, False, False, info
+        return obs, reward, terminated, truncated, info
 
 # -------------------- MovingTargetWrapper --------------------
 class MovingTargetWrapper(gym.Wrapper):
@@ -241,6 +240,10 @@ class MovingTargetWrapper(gym.Wrapper):
     # -------------------- Gym API --------------------
     def reset(self, **kwargs):
         obs_base, info = self.env.reset(**kwargs)
+        # self.env.reset()으로 시뮬레이션이 초기화되었으므로,
+        # 이전 타겟 ID는 더 이상 유효하지 않습니다. None으로 초기화합니다.
+        self._target_id = None
+        
         orn = p.getQuaternionFromEuler([0.0, 0.0, 0.0])
         self._spawn_or_reset_target([0.0, 0.0, self.init_target_z], orn)
 
@@ -257,19 +260,20 @@ class MovingTargetWrapper(gym.Wrapper):
         rel_pos = np.array(target_pos) - np.array(drone_pos)
 
         # obs 모드별 반환
-        rgb = self._render_rgb()
         if self.obs_mode == "rgb":
+            rgb = self._render_rgb()
             obs = rgb
         elif self.obs_mode == "rel_pos":
             obs = rel_pos.astype(np.float32)
         elif self.obs_mode == "both":
+            rgb = self._render_rgb()
             obs = {"rgb": rgb, "rel_pos": rel_pos.astype(np.float32)}
 
         return obs, info
 
 
     def step(self, action):
-        obs_base, reward_base, terminated, truncated, info = self.env.step(action)
+        obs_base, reward_base, term_base, trunc_base, info = self.env.step(action)
 
         # 타겟 업데이트
         self._update_target()
@@ -309,28 +313,32 @@ class MovingTargetWrapper(gym.Wrapper):
 
         # 종료/트렁케이션 조건
         # 1) 너무 낮음(충돌 근접)
-        terminated_local = (drone_pos[2] <= self.min_z)
+        term_local = (drone_pos[2] <= self.min_z)
 
         # 2) 너무 멀리 이탈한 상태가 오래 지속
         if dist_xy > self.max_xy:
             self._far_counter += 1
         else:
             self._far_counter = 0
-        terminated_local = terminated_local or (self._far_counter >= self.patience_steps)
+        term_local = term_local or (self._far_counter >= self.patience_steps)
 
         # TimeLimit은 외부 TimeLimit wrapper가 처리 → 여기서는 truncated_local False 유지
-        truncated_local = False
+        # 종료/트렁케이션 플래그 합치기
+        terminated = bool(term_base or term_local)
+        truncated  = bool(trunc_base)   # TimeLimit은 그대로 유지
 
         # obs 모드별 반환
-        rgb = self._render_rgb()
+        
         if self.obs_mode == "rgb":
+            rgb = self._render_rgb()
             obs = rgb
         elif self.obs_mode == "rel_pos":
             obs = rel_pos.astype(np.float32)
         elif self.obs_mode == "both":
+            rgb = self._render_rgb()
             obs = {"rgb": rgb, "rel_pos": rel_pos.astype(np.float32)}
 
-        return obs, float(reward), bool(terminated_local), bool(truncated_local), info
+        return obs, float(reward), terminated, truncated, info
 
 
     
