@@ -260,7 +260,7 @@ if __name__ == "__main__":
     env = MovingTargetWrapper(base_env, camera_size=(256, 256))
 
     # 3) TextureWrapper로 바닥 텍스처 적용
-    texture_file = "gym_pybullet_drones/examples/textures/floor1.jpg"  # 원하는 텍스처 파일
+    texture_file = "gym_pybullet_drones/examples/textures/grass_texture.png"  # 원하는 텍스처 파일
     env = TextureWrapper(env, texture_file)
 
     # 4) BoundaryWrapper로 경계 패널티 추가
@@ -273,7 +273,7 @@ if __name__ == "__main__":
     
     t0 = time.time()
     ep_len = 0
-    while time.time() - t0 < 60: # 60초 동안 테스트
+    while time.time() - t0 < 6000: # 60초 동안 테스트
         a = env.action_space.sample() # 랜덤 행동
         obs, r, term, trunc, info = env.step(a)
         ep_len += 1
