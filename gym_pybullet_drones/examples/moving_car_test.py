@@ -14,6 +14,17 @@ from gym_pybullet_drones.envs.HoverAviary import HoverAviary
 from gym_pybullet_drones.utils.enums import ActionType
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
 
+"""강화학습할 때 이 커스텀 환경 만들기"""
+def make_custom_env(gui=False, obs_mode="rel_pos"):
+    INIT_XYZS = np.array([[0, 0, 10.0]])
+    base_env = CustomHoverAviary(gui=gui, initial_xyzs=INIT_XYZS, act=ActionType.VEL)
+    base_env = TimeLimit(base_env, max_episode_steps=2400)
+
+    env = MovingTargetWrapper(base_env, camera_size=(84, 84), obs_mode=obs_mode)
+    env = TextureWrapper(env, "gym_pybullet_drones/examples/textures/floor1.jpg")
+    env = BoundaryWrapper(env, x_max=25.0, y_max=25.0, z_min=1.0, z_max=20.0)
+    return env
+
 # -------------------- Custom HoverAviary --------------------
 class CustomHoverAviary(HoverAviary):
     def _computeTerminated(self):
@@ -54,22 +65,46 @@ class MovingTargetWrapper(gym.Wrapper):
     - 사각형 범위 내에서 자동으로 움직이도록 합니다.
     - 드론 시점의 카메라 RGB 이미지를 관측으로 반환합니다.
     """
-    def __init__(
-        self,
-        env,
-        camera_size=(84, 84),
-        fov_deg=90.0,
-        near=0.02,
-        far=20.0,
-        init_target_z=0.5,
-        target_urdf="cube.urdf",
-        target_rgba=(1.0, 0.2, 0.2, 1.0),
-        x_max=25.0,
-        y_max=25.0,
-        speed=0.01,
-    ):
-        super().__init__(env)
+    def __init__(self, env,
+                 obs_mode="rel_pos",      # "rgb"/"rel_pos"/"both"
+                 camera_size=(84, 84),
+                 fov_deg=90.0, near=0.02, far=20.0,
+                 init_target_z=0.5,
+                 target_urdf="cube.urdf", target_rgba=(1.0, 0.2, 0.2, 1.0),
+                 x_max=25.0, y_max=25.0,  # 타겟 이동 가능 범위(수평)
+                 speed=0.01,
 
+                 # ---- 추가: 보상/종료 파라미터 ----
+                 desired_alt_above=10.0,  # 타겟 '상공' 목표 고도 차
+                 xy_tol=1.5,              # 성공 밴드(수평)
+                 z_tol=1.0,               # 성공 밴드(수직)
+                 max_xy=40.0,             # 너무 멀어지면 종료
+                 min_z=0.2,               # 거의 충돌 수준
+                 alive_bonus=0.05,        # 매 스텝 생존 보너스
+                 w_xy=1.0,                # 수평 오차 가중치
+                 w_z=0.7,                 # 수직 오차 가중치
+                 w_act=0.001,             # 액션 크기 패널티
+                 w_vel=0.001,             # 드론 속도 패널티(선택)
+                 success_reward=2.0,      # 성공 밴드 안이면 추가 보상
+                 patience_steps=180       # 일정 시간 너무 멀면 종료
+                 ):
+        super().__init__(env)
+        self.obs_mode = obs_mode
+        # 보상/종료 파라미터 저장
+        self.desired_alt_above = float(desired_alt_above)
+        self.xy_tol = float(xy_tol)
+        self.z_tol = float(z_tol)
+        self.max_xy = float(max_xy)
+        self.min_z = float(min_z)
+        self.alive_bonus = float(alive_bonus)
+        self.w_xy = float(w_xy)
+        self.w_z = float(w_z)
+        self.w_act = float(w_act)
+        self.w_vel = float(w_vel)
+        self.success_reward = float(success_reward)
+        self.patience_steps = int(patience_steps)
+        # 내부 상태
+        self._far_counter = 0
         # PyBullet 리소스 경로
         p.setAdditionalSearchPath(pybullet_data.getDataPath())
 
@@ -93,11 +128,22 @@ class MovingTargetWrapper(gym.Wrapper):
         )
         self._img_flags = p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX
 
-        # 관측/행동 공간
-        self.observation_space = spaces.Box(
-            low=0, high=255, shape=(self.H, self.W, 3), dtype=np.uint8
-        )
+        # 관측/행동 공간        
+        if self.obs_mode == "rgb":
+            self.observation_space = spaces.Box(
+                low=0, high=255, shape=(self.H, self.W, 3), dtype=np.uint8
+            )
+        elif self.obs_mode == "rel_pos":
+            self.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32
+            )
+        elif self.obs_mode == "both":
+            self.observation_space = spaces.Dict({
+                "rgb": spaces.Box(low=0, high=255, shape=(self.H, self.W, 3), dtype=np.uint8),
+                "rel_pos": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
+            })
         self.action_space = self.env.action_space
+
 
         # 움직임 관련
         self.x_max, self.y_max = x_max, y_max
@@ -202,8 +248,25 @@ class MovingTargetWrapper(gym.Wrapper):
         self.target_vel = np.random.uniform(-self.speed, self.speed, size=2)
         self.target_pos = np.array([0.0, 0.0, self.init_target_z])
 
+        # 종료/보상 관련 내부 상태 초기화
+        self._far_counter = 0
+
+        # 좌표 계산
+        drone_pos, _ = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
+        target_pos, _ = p.getBasePositionAndOrientation(self._target_id, physicsClientId=self._client)
+        rel_pos = np.array(target_pos) - np.array(drone_pos)
+
+        # obs 모드별 반환
         rgb = self._render_rgb()
-        return rgb, info
+        if self.obs_mode == "rgb":
+            obs = rgb
+        elif self.obs_mode == "rel_pos":
+            obs = rel_pos.astype(np.float32)
+        elif self.obs_mode == "both":
+            obs = {"rgb": rgb, "rel_pos": rel_pos.astype(np.float32)}
+
+        return obs, info
+
 
     def step(self, action):
         obs_base, reward_base, terminated, truncated, info = self.env.step(action)
@@ -211,9 +274,64 @@ class MovingTargetWrapper(gym.Wrapper):
         # 타겟 업데이트
         self._update_target()
 
+        # 현재 상대좌표
+        drone_pos, drone_orn = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
+        target_pos, _ = p.getBasePositionAndOrientation(self._target_id, physicsClientId=self._client)
+        rel_pos = np.array(target_pos) - np.array(drone_pos)   # [dx, dy, dz]
+        dx, dy, dz = rel_pos
+        dist_xy = float(np.hypot(dx, dy))
+        z_err   = float(dz + self.desired_alt_above)  # 목표상태에서: dz = -desired_alt_above → z_err=0
+
+        # 보상 구성
+        reward = 0.0
+        reward += self.alive_bonus
+        reward -= self.w_xy * (dist_xy**2)
+        reward -= self.w_z  * (z_err**2)
+
+        # 액션 패널티(연속액션 가정)
+        try:
+            a_norm = float(np.linalg.norm(np.asarray(action)))
+            reward -= self.w_act * (a_norm**2)
+        except Exception:
+            pass
+
+        # 드론 속도 패널티(선택)
+        try:
+            lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
+            v = float(np.linalg.norm(lin_vel))
+            reward -= self.w_vel * (v**2)
+        except Exception:
+            pass
+
+        # 성공 밴드 추가 보상 (수평/수직 모두 허용 오차 내)
+        if (dist_xy <= self.xy_tol) and (abs(z_err) <= self.z_tol):
+            reward += self.success_reward
+
+        # 종료/트렁케이션 조건
+        # 1) 너무 낮음(충돌 근접)
+        terminated_local = (drone_pos[2] <= self.min_z)
+
+        # 2) 너무 멀리 이탈한 상태가 오래 지속
+        if dist_xy > self.max_xy:
+            self._far_counter += 1
+        else:
+            self._far_counter = 0
+        terminated_local = terminated_local or (self._far_counter >= self.patience_steps)
+
+        # TimeLimit은 외부 TimeLimit wrapper가 처리 → 여기서는 truncated_local False 유지
+        truncated_local = False
+
+        # obs 모드별 반환
         rgb = self._render_rgb()
-        reward = float(reward_base)
-        return rgb, reward, terminated, truncated, info
+        if self.obs_mode == "rgb":
+            obs = rgb
+        elif self.obs_mode == "rel_pos":
+            obs = rel_pos.astype(np.float32)
+        elif self.obs_mode == "both":
+            obs = {"rgb": rgb, "rel_pos": rel_pos.astype(np.float32)}
+
+        return obs, float(reward), bool(terminated_local), bool(truncated_local), info
+
 
     
 #---------------------------texture wrapper---------------
@@ -257,10 +375,10 @@ if __name__ == "__main__":
     base_env = TimeLimit(base_env, max_episode_steps=2400)
 
     # 2) MovingTargetWrapper로 타겟 추가
-    env = MovingTargetWrapper(base_env, camera_size=(256, 256))
+    env = MovingTargetWrapper(base_env, camera_size=(256, 256), obs_mode="rel_pos")
 
     # 3) TextureWrapper로 바닥 텍스처 적용
-    texture_file = "gym_pybullet_drones/examples/textures/grass_texture.png"  # 원하는 텍스처 파일
+    texture_file = "gym_pybullet_drones/examples/textures/floor1.jpg"  # 원하는 텍스처 파일
     env = TextureWrapper(env, texture_file)
 
     # 4) BoundaryWrapper로 경계 패널티 추가
@@ -268,23 +386,34 @@ if __name__ == "__main__":
 
     # --- 테스트 루프 ---
     obs, info = env.reset()
-    print(f"Observation space shape: {env.observation_space.shape}")
+    print(f"Observation space: {env.observation_space}")
     print(f"Action space shape: {env.action_space.shape}")
     
     t0 = time.time()
     ep_len = 0
-    while time.time() - t0 < 6000: # 60초 동안 테스트
+    while time.time() - t0 < 60: # 60초 동안 테스트
         a = env.action_space.sample() # 랜덤 행동
         obs, r, term, trunc, info = env.step(a)
         ep_len += 1
 
         # 화면에 이미지 띄우기 (OpenCV 필요: pip install opencv-python)
-        frame = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
-        cv2.imshow('Drone Camera', cv2.resize(frame, (512, 512)))
-        cv2.moveWindow('Drone Camera', 0, 0)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+        if isinstance(obs, dict) and "rgb" in obs:
+            # both 모드
+            frame = cv2.cvtColor(obs["rgb"], cv2.COLOR_RGB2BGR)
+        elif isinstance(obs, np.ndarray) and obs.ndim == 3:
+            # rgb 모드
+            frame = cv2.cvtColor(obs, cv2.COLOR_RGB2BGR)
+        elif isinstance(obs, np.ndarray) and obs.ndim == 1:
+            # rel_pos 모드 → 좌표값 출력
+            #print("Relative position:", obs)
+            frame = None
+        else:
+            frame = None
 
+        if frame is not None:
+            cv2.imshow('Drone Camera', cv2.resize(frame, (512, 512)))
+            cv2.moveWindow('Drone Camera', 0, 0)
+            
         if term or trunc:
             print(f"Episode ended after {ep_len} steps. Resetting...")
             obs, info = env.reset()
