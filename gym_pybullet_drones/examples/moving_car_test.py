@@ -133,13 +133,15 @@ class MovingTargetWrapper(gym.Wrapper):
                 low=0, high=255, shape=(self.H, self.W, 3), dtype=np.uint8
             )
         elif self.obs_mode == "rel_pos":
+            # 상대위치(3) + 선속도(3) + 각속도(3) =9
             self.observation_space = spaces.Box(
-                low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32
+                low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32
             )
         elif self.obs_mode == "both":
             self.observation_space = spaces.Dict({
                 "rgb": spaces.Box(low=0, high=255, shape=(self.H, self.W, 3), dtype=np.uint8),
-                "rel_pos": spaces.Box(low=-np.inf, high=np.inf, shape=(3,), dtype=np.float32)
+                # rel_pos 부분의 shape을 9로 변경. 상대위치(3) + 선속도(3) + 각속도(3) = 9
+                "rel_pos": spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
             })
         self.action_space = self.env.action_space
 
@@ -259,85 +261,81 @@ class MovingTargetWrapper(gym.Wrapper):
         target_pos, _ = p.getBasePositionAndOrientation(self._target_id, physicsClientId=self._client)
         rel_pos = np.array(target_pos) - np.array(drone_pos)
 
+        # 자기인식 정보 추가: 드론의 속도와 각속도
+        lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
+        full_obs_vector = np.concatenate([rel_pos, lin_vel, ang_vel]).astype(np.float32)
+
         # obs 모드별 반환
         if self.obs_mode == "rgb":
             rgb = self._render_rgb()
             obs = rgb
         elif self.obs_mode == "rel_pos":
-            obs = rel_pos.astype(np.float32)
+            obs = full_obs_vector
         elif self.obs_mode == "both":
             rgb = self._render_rgb()
-            obs = {"rgb": rgb, "rel_pos": rel_pos.astype(np.float32)}
+            obs = {"rgb": rgb, "rel_pos": full_obs_vector}
 
         return obs, info
 
 
     def step(self, action):
-        obs_base, reward_base, term_base, trunc_base, info = self.env.step(action)
+        # 1. 행동을 취하기 전의 상태(드론-타겟 거리)를 저장합니다.
+        drone_pos_before, _ = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
+        target_pos_before, _ = p.getBasePositionAndOrientation(self._target_id, physicsClientId=self._client)
+        dist_before = np.linalg.norm(np.array(target_pos_before) - np.array(drone_pos_before))
 
-        # 타겟 업데이트
+        # 2. 에이전트의 행동을 실제 환경에 적용하고, 타겟을 움직입니다.
+        obs_base, reward_base, term_base, trunc_base, info = self.env.step(action)
         self._update_target()
 
-        # 현재 상대좌표
+        # 3. 행동을 취한 후의 새로운 상태 정보를 가져옵니다.
         drone_pos, drone_orn = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
         target_pos, _ = p.getBasePositionAndOrientation(self._target_id, physicsClientId=self._client)
-        rel_pos = np.array(target_pos) - np.array(drone_pos)   # [dx, dy, dz]
-        dx, dy, dz = rel_pos
-        dist_xy = float(np.hypot(dx, dy))
-        z_err   = float(dz + self.desired_alt_above)  # 목표상태에서: dz = -desired_alt_above → z_err=0
+        dist_after = np.linalg.norm(np.array(target_pos) - np.array(drone_pos))
+        rel_pos = np.array(target_pos) - np.array(drone_pos)
 
-        # 보상 구성
-        reward = 0.0
-        reward += self.alive_bonus
-        reward -= self.w_xy * (dist_xy**2)
-        reward -= self.w_z  * (z_err**2)
+        # 4. 보상을 계산합니다.
+        # (핵심) 거리가 가까워졌으면 양수, 멀어졌으면 음수 보상을 줍니다.
+        # 곱해주는 상수(10.0)는 보상의 크기를 조절하는 역할을 합니다.
+        reward = (dist_before - dist_after) * 10.0
 
-        # 액션 패널티(연속액션 가정)
-        try:
-            a_norm = float(np.linalg.norm(np.asarray(action)))
-            reward -= self.w_act * (a_norm**2)
-        except Exception:
-            pass
+        # (효율성) 매 스텝마다 작은 페널티를 주어, 에이전트가 임무를 빨리 완수하도록 유도합니다.
+        reward -= 0.1
 
-        # 드론 속도 패널티(선택)
-        try:
-            lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
-            v = float(np.linalg.norm(lin_vel))
-            reward -= self.w_vel * (v**2)
-        except Exception:
-            pass
+        # 5. 에피소드 종료 조건을 계산합니다.
+        done_by_dist = False
+        # (성공) 타겟에 매우 가까워지면 큰 보너스와 함께 에피소드를 종료합니다.
+        if dist_after < 2.0:
+            reward += 100.0
+            done_by_dist = True
+        # (실패) 타겟에서 너무 멀어지면 큰 페널티와 함께 에피소드를 종료합니다.
+        elif dist_after > 50.0:
+            reward -= 100.0
+            done_by_dist = True
 
-        # 성공 밴드 추가 보상 (수평/수직 모두 허용 오차 내)
-        if (dist_xy <= self.xy_tol) and (abs(z_err) <= self.z_tol):
-            reward += self.success_reward
+        # (실패) 드론이 너무 낮게 날아 추락 위험이 있을 때 에피소드를 종료합니다.
+        term_local_crash = (drone_pos[2] <= self.min_z)
 
-        # 종료/트렁케이션 조건
-        # 1) 너무 낮음(충돌 근접)
-        term_local = (drone_pos[2] <= self.min_z)
+        # 모든 종료 조건들을 통합합니다. (하나라도 만족하면 종료)
+        terminated = bool(term_base or term_local_crash or done_by_dist)
+        truncated = bool(trunc_base)  # TimeLimit Wrapper의 시간 초과 신호는 그대로 사용
 
-        # 2) 너무 멀리 이탈한 상태가 오래 지속
-        if dist_xy > self.max_xy:
-            self._far_counter += 1
-        else:
-            self._far_counter = 0
-        term_local = term_local or (self._far_counter >= self.patience_steps)
+        # 6. 에이전트에게 전달할 관측(Observation) 정보를 구성합니다.
+        lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
+        full_obs_vector = np.concatenate([rel_pos, lin_vel, ang_vel]).astype(np.float32)
 
-        # TimeLimit은 외부 TimeLimit wrapper가 처리 → 여기서는 truncated_local False 유지
-        # 종료/트렁케이션 플래그 합치기
-        terminated = bool(term_base or term_local)
-        truncated  = bool(trunc_base)   # TimeLimit은 그대로 유지
-
-        # obs 모드별 반환
-        
         if self.obs_mode == "rgb":
             rgb = self._render_rgb()
             obs = rgb
         elif self.obs_mode == "rel_pos":
-            obs = rel_pos.astype(np.float32)
+            obs = full_obs_vector
         elif self.obs_mode == "both":
             rgb = self._render_rgb()
-            obs = {"rgb": rgb, "rel_pos": rel_pos.astype(np.float32)}
+            obs = {"rgb": rgb, "rel_pos": full_obs_vector}
+        else: # 기본값 설정
+            obs = full_obs_vector
 
+        # 7. 최종 계산된 값들을 반환합니다.
         return obs, float(reward), terminated, truncated, info
 
 
