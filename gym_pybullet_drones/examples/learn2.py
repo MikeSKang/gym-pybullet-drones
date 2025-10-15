@@ -14,6 +14,7 @@ obs_mode = "rel_pos"
 if __name__ == "__main__":
     # ---------------- CUDA 선택 ----------------
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cpu"
     print(f"Using device: {device}")
 
     # ---------------- 환경 생성 ----------------
@@ -56,7 +57,7 @@ if __name__ == "__main__":
     )
 
     # ---------------- 콜백 ----------------
-    callback_on_best = StopTrainingOnRewardThreshold(reward_threshold=200, verbose=1)
+    callback_on_best = StopTrainingOnRewardThreshold(reward_threshold=20000, verbose=1)
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path="./models_multi/",

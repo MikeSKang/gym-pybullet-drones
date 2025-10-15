@@ -49,8 +49,8 @@ if __name__ == "__main__":
             total_reward += reward
             steps += 1
             
-            # PyBullet GUI가 켜져 있으므로, 1/240초(기본 물리엔진 속도)만큼 잠시 멈춰줍니다.
-            time.sleep(1./240.)
+            # PyBullet GUI가 켜져 있으므로, 10/240초(기본 물리엔진 속도)만큼 잠시 멈춰줍니다.
+            time.sleep(10./240.)
 
         print(f"에피소드 {episode + 1}: 총 보상 = {total_reward:.2f}, 스텝 수 = {steps}")
         obs, info = env.reset()

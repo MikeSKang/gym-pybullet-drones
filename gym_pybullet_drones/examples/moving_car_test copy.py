@@ -80,8 +80,8 @@ class MovingTargetWrapper(gym.Wrapper):
                  max_xy=30.0,             # 너무 멀어지면 종료
                  min_z=0.2,               # 거의 충돌 수준
                  alive_bonus=0.05,        # 매 스텝 생존 보너스
-                 w_xy=1.0,                # 수평 오차 가중치
-                 w_z=0.7,                 # 수직 오차 가중치
+                 w_xy=5.0,                # 수평 오차 가중치
+                 w_z=3.5,                 # 수직 오차 가중치
                  w_act=0.001,             # 액션 크기 패널티
                  w_vel=0.001,             # 드론 속도 패널티(선택)
                  success_reward=2.0,      # 성공 밴드 안이면 추가 보상
@@ -148,7 +148,7 @@ class MovingTargetWrapper(gym.Wrapper):
 
         # 움직임 관련
         self.max_speed = 2.0        # 자동차의 최대 속도
-        self.max_accel = 0.05       # 최대 가속/감속
+        self.max_accel = 1.0       # 최대 가속/감속
         self.max_turn_rate = 0.05    # 최대 회전율 (라디안)
         
         self.speed = 0.05            # 현재 속도
@@ -222,7 +222,7 @@ class MovingTargetWrapper(gym.Wrapper):
         vy = self.speed * np.sin(self.angle)
 
         # 5. 새로운 위치를 계산합니다.
-        self.dt = 10.0/240.0
+        self.dt = 1.0/240.0
         self.target_pos[0] += vx * self.dt
         self.target_pos[1] += vy * self.dt
 
@@ -319,67 +319,70 @@ class MovingTargetWrapper(gym.Wrapper):
     def step(self, action):
         # 1. 에이전트의 행동을 실제 환경에 적용하고, 타겟을 움직입니다.
         obs_base, reward_base, term_base, trunc_base, info = self.env.step(action)
+        
         prev_target_pos = self.target_pos.copy()
         prev_drone_pos, _ = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
         prev_dist = np.linalg.norm(np.array(prev_target_pos[:2]) - np.array(prev_drone_pos[:2]))
-        self._update_target()
+        self._update_target() 
 
         # 2. 행동 후의 새로운 상태 정보를 가져옵니다.
-        drone_pos, _ = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
+        drone_pos, drone_quat = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
         target_pos, _ = p.getBasePositionAndOrientation(self._target_id, physicsClientId=self._client)
         lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
-        curr_dist = np.linalg.norm(np.array(target_pos[:2]) - np.array(drone_pos[:2]))
-        
+
         # 3. 보상 및 종료 조건 계산에 필요한 값들을 정의합니다.
         dist_vec = np.array(target_pos) - np.array(drone_pos)
-        dist_3d = np.linalg.norm(dist_vec)
         dist_xy = np.linalg.norm(dist_vec[:2])
-        speed = np.linalg.norm(lin_vel)
+        dist_z = dist_vec[2] # Z축 거리 (부호 있음)
         
-        # 4. 보상을 계산합니다. (dqn.py 로직 적용)
         # =====================================================================
-        reward = 0.0
-        reward += (prev_dist - curr_dist) * 3.0
-        reward += self.alive_bonus
-        # [DQN 로직 1] 거리 구간에 따른 보상/페널티
-        if dist_3d < 5.0:
-            reward -= (5.0 - dist_3d) * 0.5  # 너무 가까우면 페널티
-        elif 7.0 <= dist_3d <= 15.0:
-            reward += 1.0  # 이상적인 추적 거리
-        elif dist_3d > 20.0:
-            reward -= (dist_3d - 20.0) * 0.5  # 너무 멀면 페널티
-
-        # [DQN 로직 2] 방향성 보상 (타겟을 향해 움직이면 보상)
-        velocity_vec_xy = np.array(lin_vel[:2])
-        dist_vec_xy = dist_vec[:2]
-        if dist_xy > 1e-6:
-            # 내적(dot product)을 이용해 접근 속도 계산
-            approach_speed = np.dot(velocity_vec_xy, dist_vec_xy / dist_xy)
-            reward += 0.1 * approach_speed
-
-        # [DQN 로직 3] 속도 페널티 (너무 빠르면 페널티)
-        if speed > 10.0:
-            reward -= (speed - 10.0) * 0.1
-
-        # [DQN 로직 4] 고도 안정성 페널티
-        drone_z = drone_pos[2]
-        if drone_z < 5.0:
-            reward -= (5.0 - drone_z) * 0.2
-        elif drone_z > 20.0:
-            reward -= (drone_z - 20.0) * 0.2
+        # ===== 개선된 보상 함수 로직 =====
         # =====================================================================
+        reward = self.alive_bonus # 살아있으면 매 스텝 기본 점수
 
-        # 5. 에피소드 종료 조건을 계산합니다. (dqn.py(저번학기결과) 로직 적용)
-        done_by_dist = False
-        if dist_3d > self.max_xy:
-            reward -= 100.0  # 실패에 대한 큰 페널티를 명시적으로 추가
-            done_by_dist = True
-        elif dist_3d < 2.0:
-            reward -= 100.0
-            done_by_dist = True
-        term_local_crash = (drone_pos[2] <= self.min_z) # 기존 충돌 조건은 유지
+        curr_dist = np.linalg.norm(np.array(target_pos[:2]) - np.array(drone_pos[:2]))
+        reward += (prev_dist - curr_dist) * 3.0   # ← distance 변화 보상 추가 (가중치 3~5)
+
+        # [개선 1] 거리 오차에 대한 페널티 (Gaussian-like)
+        # 수평(xy) 거리 오차: 목표는 타겟 바로 위(xy 오차 0)
+        xy_error = dist_xy
+        reward -= self.w_xy * (1 - np.exp(-0.5 * xy_error**2))
+
+        # 수직(z) 거리 오차: 목표는 타겟보다 desired_alt_above 만큼 위에 있는 것
+        z_error = abs((drone_pos[2] - target_pos[2]) - self.desired_alt_above)
+        reward -= self.w_z * (1 - np.exp(-0.5 * z_error**2))
+
+        # [개선 2] 드론의 자세(Yaw) 페널티
+        # 드론의 전방 벡터 계산
+        rot_matrix = np.array(p.getMatrixFromQuaternion(drone_quat)).reshape(3, 3)
+        fwd_vec = rot_matrix[:, 0]  # X축이 전방
         
-        terminated = bool(term_base or term_local_crash or done_by_dist)
+        # 드론의 전방 벡터와 타겟 방향 벡터 사이의 각도 오차 계산
+        target_dir_vec = dist_vec / (np.linalg.norm(dist_vec) + 1e-6)
+        orientation_error = 1 - np.dot(fwd_vec[:2], target_dir_vec[:2]) # 수평(XY) 평면에서만 고려
+        reward -= 0.1 * orientation_error # 가중치 0.1 (조정 가능)
+
+        # [개선 3] 제어 입력(Action) 및 속도 페널티
+        reward -= self.w_act * np.linalg.norm(action)
+        reward -= self.w_vel * np.linalg.norm(lin_vel)
+
+        # [개선 4] 성공 보너스
+        # 수평 및 수직 오차가 허용 범위(tolerance) 안에 들어오면 추가 보상
+        is_success = (xy_error < self.xy_tol) and (z_error < self.z_tol)
+        if is_success:
+            reward += self.success_reward
+        
+        # =====================================================================
+
+        # 5. 에피소드 종료 조건을 계산합니다.
+        # 너무 멀어지면 종료
+        if dist_xy > self.max_xy:
+            self._far_counter += 1
+        else:
+            self._far_counter = 0
+        
+        # 기존 충돌 조건 + 너무 멀리 떨어져 있는 시간이 길어지면 종료
+        terminated = bool(term_base or (drone_pos[2] <= self.min_z) or (self._far_counter > self.patience_steps))
         truncated = bool(trunc_base)
 
         # 6. 에이전트에게 전달할 관측(Observation) 정보를 구성합니다.
@@ -397,7 +400,15 @@ class MovingTargetWrapper(gym.Wrapper):
         else: # 기본값 설정
             obs = full_obs_vector
 
-        # 7. 최종 계산된 값들을 반환합니다.
+        # 7. Info 딕셔너리에 디버깅 정보 추가
+        info['reward_breakdown'] = {
+            'xy_error': -self.w_xy * (1 - np.exp(-0.5 * xy_error**2)),
+            'z_error': -self.w_z * (1 - np.exp(-0.5 * z_error**2)),
+            'orientation_error': -0.1 * orientation_error,
+            'success_bonus': self.success_reward if is_success else 0.0
+        }
+
+        # 8. 최종 계산된 값들을 반환합니다.
         return obs, float(reward), terminated, truncated, info
 
 
