@@ -166,7 +166,7 @@ class MovingTargetWrapper(gym.Wrapper):
             )
 
             # 텍스처 적용 코드 추가
-            texture_path = "gym_pybullet_drones/examples/textures/moving_obj.jpg"
+            texture_path = "gym_pybullet_drones/examples/textures/moving_obj2.png"
             if os.path.exists(texture_path):
                 texture_id = p.loadTexture(texture_path)
                 if texture_id != -1:
@@ -389,7 +389,13 @@ if __name__ == "__main__":
 
     # 4) BoundaryWrapper로 경계 패널티 추가
     env = BoundaryWrapper(env, x_max=25.0, y_max=25.0, z_min=1.0, z_max=20.0)
-
+    # 디버그용 카메라의 위치와 각도를 설정합니다.
+    p.resetDebugVisualizerCamera(
+        cameraDistance=20,      # 카메라와 타겟 사이의 거리 (값을 키울수록 멀어짐)
+        cameraYaw=45,           # 카메라의 수평 회전 각도 (정면 = 0)
+        cameraPitch=-30,        # 카메라의 수직 기울기 (위에서 아래로 보는 각도)
+        cameraTargetPosition=[0, 0, 0] # 카메라가 바라보는 지점 (월드 좌표)
+    )
     # --- 테스트 루프 ---
     obs, info = env.reset()
     print(f"Observation space: {env.observation_space}")
