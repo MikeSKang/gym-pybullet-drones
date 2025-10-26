@@ -5,6 +5,7 @@ import pybullet as p
 # PPO 모델과 커스텀 환경을 불러옵니다.
 from stable_baselines3 import PPO
 from moving_car_test import make_custom_env
+from gym_pybullet_drones.utils.utils import sync
 
 # 1. 불러올 모델 파일의 경로
 MODEL_PATH = "ppo_drone_multi_final.zip"
@@ -17,6 +18,8 @@ if __name__ == "__main__":
     # --- 환경 생성 ---
     # 테스트 시에는 시뮬레이션 창을 봐야 하므로 gui=True로 설정합니다.
     env = make_custom_env(gui=True, obs_mode=OBS_MODE)
+
+    TIMESTEP = env.CTRL_TIMESTEP  # 시뮬레이션 타임스텝 (초)
     # 디버그용 카메라의 위치와 각도를 설정합니다.
     p.resetDebugVisualizerCamera(
         cameraDistance=20,      # 카메라와 타겟 사이의 거리 (값을 키울수록 멀어짐)
@@ -40,6 +43,9 @@ if __name__ == "__main__":
         total_reward = 0
         steps = 0
         
+        start = time.time()
+        obs, info = env.reset()
+
         while not (terminated or truncated):
             # deterministic=True: 학습된 정책이 가장 좋다고 생각하는 행동을 항상 선택합니다.
             action, _states = model.predict(obs, deterministic=True)
@@ -49,8 +55,7 @@ if __name__ == "__main__":
             total_reward += reward
             steps += 1
             
-            # PyBullet GUI가 켜져 있으므로, 10/240초(기본 물리엔진 속도)만큼 잠시 멈춰줍니다.
-            time.sleep(10./240.)
+            sync(steps, start, TIMESTEP)
 
         print(f"에피소드 {episode + 1}: 총 보상 = {total_reward:.2f}, 스텝 수 = {steps}")
         obs, info = env.reset()
