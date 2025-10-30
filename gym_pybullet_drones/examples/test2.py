@@ -22,7 +22,7 @@ if __name__ == "__main__":
     TIMESTEP = env.CTRL_TIMESTEP  # 시뮬레이션 타임스텝 (초)
     # 디버그용 카메라의 위치와 각도를 설정합니다.
     p.resetDebugVisualizerCamera(
-        cameraDistance=20,      # 카메라와 타겟 사이의 거리 (값을 키울수록 멀어짐)
+        cameraDistance=5,      # 카메라와 타겟 사이의 거리 (값을 키울수록 멀어짐)
         cameraYaw=45,           # 카메라의 수평 회전 각도 (정면 = 0)
         cameraPitch=-30,        # 카메라의 수직 기울기 (위에서 아래로 보는 각도)
         cameraTargetPosition=[0, 0, 0] # 카메라가 바라보는 지점 (월드 좌표)

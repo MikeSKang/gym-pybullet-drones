@@ -18,7 +18,7 @@ from gym_pybullet_drones.utils.utils import sync
 
 """강화학습할 때 이 커스텀 환경 만들기"""
 def make_custom_env(gui=False, obs_mode="rel_pos"):
-    INIT_XYZS = np.array([[0, 0, 10.0]])
+    INIT_XYZS = np.array([[0, 0, 2.0]])
     base_env = CustomHoverAviary(gui=gui, initial_xyzs=INIT_XYZS, act=ActionType.VEL)
     base_env = TimeLimit(base_env, max_episode_steps=2400)
 
@@ -91,14 +91,14 @@ class MovingTargetWrapper(gym.Wrapper):
         self.w_speed    = 0.05     # 드론 속도 페널티 가중치
         self.w_alt      = 0.1      # 고도 페널티 가중치
         
-        self.desired_dist    = 10.0     # 목표 유지 거리 [m]
+        self.desired_dist    = 2.0     # 목표 유지 거리 [m]
         self.dist_sharpness  = 0.1      # 거리 보상 곡선의 뾰족함 정도 (값이 클수록 좁고 뾰족해짐)
         
         self.max_drone_speed = 10.0     # 페널티가 시작되는 드론 속도 [m/s]
-        self.alt_range       = [5.0, 20.0] # 이상적인 고도 범위 [m]
+        self.alt_range       = [1.0, 5.0] # 이상적인 고도 범위 [m]
 
-        self.min_dist_fail   = 2.0      # 실패(너무 가까움) 기준 [m]
-        self.max_dist_fail   = 30.0     # 실패(너무 멂) 기준 [m]
+        self.min_dist_fail   = 0.5      # 실패(너무 가까움) 기준 [m]
+        self.max_dist_fail   = 10.0     # 실패(너무 멂) 기준 [m]
         self.min_z_crash     = 0.2      # 실패(추락) 기준 [m]
         
         self.dt = self.env.unwrapped.CTRL_TIMESTEP
@@ -276,10 +276,10 @@ class MovingTargetWrapper(gym.Wrapper):
         self._spawn_or_reset_target([tx, ty, self.init_target_z], orn)
 
         # 드론 시작 위치도 랜덤하게 (타겟과 일정 거리 유지)
-        rand_r = np.random.uniform(6.0, 18.0)
+        rand_r = np.random.uniform(0.0, 2.0)
         rand_th = np.random.uniform(0, 2*np.pi)
         dx, dy = rand_r * np.cos(rand_th), rand_r * np.sin(rand_th)
-        drone_pos0 = np.array([dx, dy, np.random.uniform(8.0, 14.0)])
+        drone_pos0 = np.array([dx, dy, np.random.uniform(2.0, 3.0)])
         p.resetBasePositionAndOrientation(
             self._drone_id,
             drone_pos0.tolist(),
@@ -435,7 +435,7 @@ class TextureWrapper(gym.Wrapper):
 if __name__ == "__main__":
     
     # 1) 기본 환경 생성
-    INIT_XYZS = np.array([[0, 0, 10.0]])
+    INIT_XYZS = np.array([[0, 0, 2.0]])
     base_env = CustomHoverAviary(gui=True,
                                 initial_xyzs=INIT_XYZS,
                                 act=ActionType.VEL)
