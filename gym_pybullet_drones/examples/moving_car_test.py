@@ -34,6 +34,7 @@ class CustomHoverAviary(HoverAviary):
         
         # PPO가 내부 env에서 접근할 때를 대비해 기본값 생성
         self.prev_action = np.zeros(4, dtype=np.float32)
+        self.SPEED_LIMIT = 10.0
     def _computeTerminated(self):
         return False  # 성공 조건 무시 (학습 목적이면 직접 정의해도 됨)
 
@@ -42,7 +43,7 @@ class CustomHoverAviary(HoverAviary):
 
 # -------------------- BoundaryWrapper --------------------
 class BoundaryWrapper(gym.Wrapper):
-    def __init__(self, env, x_max=25.0, y_max=25.0, z_min=1.0, z_max=15.0):
+    def __init__(self, env, x_max=5.0, y_max=5.0, z_min=1.0, z_max=15.0):
         super().__init__(env)
         self.x_max, self.y_max = x_max, y_max
         self.z_min, self.z_max = z_min, z_max
@@ -76,8 +77,8 @@ class MovingTargetWrapper(gym.Wrapper):
                  obs_mode="rel_pos",
                  camera_size=(84, 84),
                  init_target_z=0.03,
-                 x_max=25.0, # 자동차 활동 반경
-                 y_max=25.0,
+                 x_max=5.0, # 자동차 활동 반경
+                 y_max=5.0,
                  ):
         super().__init__(env)
         self.obs_mode = obs_mode
@@ -90,12 +91,15 @@ class MovingTargetWrapper(gym.Wrapper):
         self.w_approach = 1.0     # 접근 속도 보상 가중치
         self.w_speed    = 0.05     # 드론 속도 페널티 가중치
         self.w_alt      = 0.1      # 고도 페널티 가중치
+        self.w_ang_vel = 0.05      # 각속도 페널티 가중치
+        self.w_action_rate = 0.01  # 행동 변화율 페널티 가중치
+        self.w_action = 0.02       # 행동 크기 페널티 가중치
         
         self.desired_dist    = 2.0     # 목표 유지 거리 [m]
-        self.dist_sharpness  = 0.5      # 거리 보상 곡선의 뾰족함 정도 (값이 클수록 좁고 뾰족해짐)
+        self.dist_sharpness  = 0.5     # 거리 보상 곡선의 뾰족함 정도 (값이 클수록 좁고 뾰족해짐)
         
         self.max_drone_speed = 10.0     # 페널티가 시작되는 드론 속도 [m/s]
-        self.alt_range       = [1.0, 3.0] # 이상적인 고도 범위 [m]
+        self.alt_range       = [1.8, 2.2] # 이상적인 고도 범위 [m]
 
         self.min_dist_fail   = 0.5      # 실패(너무 가까움) 기준 [m]
         self.max_dist_fail   = 6.0     # 실패(너무 멂) 기준 [m]
@@ -137,7 +141,7 @@ class MovingTargetWrapper(gym.Wrapper):
         self.target_pos = np.array([0.0, 0.0, self.init_target_z])
         
         self.min_speed = 0.5
-        self.max_speed = 2.0
+        self.max_speed = 1.0
         self.max_accel = 0.1
         self.max_turn_rate = 0.1
         
@@ -272,8 +276,8 @@ class MovingTargetWrapper(gym.Wrapper):
         
         #타겟 위치 랜덤성
         orn = p.getQuaternionFromEuler([0.0, 0.0, 0.0])
-        tx = np.random.uniform(-5.0, 5.0)
-        ty = np.random.uniform(-5.0, 5.0)
+        tx = np.random.uniform(-1.0, 1.0)
+        ty = np.random.uniform(-1.0, 1.0)
         self._spawn_or_reset_target([tx, ty, self.init_target_z], orn)
 
         # 드론 시작 위치도 랜덤하게 (타겟과 일정 거리 유지)
@@ -333,6 +337,7 @@ class MovingTargetWrapper(gym.Wrapper):
 
         dist_vec = np.array(target_pos) - np.array(drone_pos)
         dist_3d = np.linalg.norm(dist_vec)
+        dist_xy = np.linalg.norm(dist_vec[:2])
         if not hasattr(self, "_prev_dist"):
             self._prev_dist = dist_3d
 
@@ -342,11 +347,11 @@ class MovingTargetWrapper(gym.Wrapper):
 
         # (A) 거리 보상 (종 모양 곡선): 목표 거리에 가까울수록 보상이 커짐
         error = dist_3d - self.desired_dist
+        #error = dist_xy - self.desired_dist
         dist_reward = np.exp(-self.dist_sharpness * (error**2))
         reward += self.w_dist * dist_reward
         
         # (B) 접근 속도 보상: 타겟 방향으로 움직이면 보너스
-        dist_xy = np.linalg.norm(dist_vec[:2])
         if dist_xy > 1e-6:
             approach_speed = np.dot(lin_vel[:2], dist_vec[:2] / dist_xy)
             reward += self.w_approach * approach_speed
@@ -366,7 +371,16 @@ class MovingTargetWrapper(gym.Wrapper):
 
         # (E) 행동 페널티: 너무 큰 행동을 취하면 페널티
         action_penalty = np.linalg.norm(action) # 행동 벡터의 크기
-        reward -= 0.003 * action_penalty # 작은 가중치를 곱해 페널티로 사용
+        reward -= self.w_action * action_penalty # 작은 가중치를 곱해 페널티로 사용
+
+        # (F) 각속도 페널티 추가
+        ang_vel_norm = np.linalg.norm(ang_vel)
+        reward -= self.w_ang_vel * ang_vel_norm
+
+        # (G) 행동 변화율 페널티 추가
+        action_diff = action - self.prev_action
+        action_rate_penalty = np.linalg.norm(action_diff)
+        reward -= self.w_action_rate * action_rate_penalty
 
         # 4. 종료(Termination) 조건 계산
         terminated = False

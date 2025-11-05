@@ -13,10 +13,12 @@ from gym_pybullet_drones.envs.BaseAviary import BaseAviary
 from gym_pybullet_drones.envs.HoverAviary import HoverAviary
 from gym_pybullet_drones.utils.enums import ActionType
 from gym_pybullet_drones.utils.enums import DroneModel, Physics
+from gym_pybullet_drones.utils.utils import sync
+
 
 """강화학습할 때 이 커스텀 환경 만들기"""
 def make_custom_env(gui=False, obs_mode="rel_pos"):
-    INIT_XYZS = np.array([[0, 0, 10.0]])
+    INIT_XYZS = np.array([[0, 0, 2.0]])
     base_env = CustomHoverAviary(gui=gui, initial_xyzs=INIT_XYZS, act=ActionType.VEL)
     base_env = TimeLimit(base_env, max_episode_steps=2400)
 
@@ -27,6 +29,12 @@ def make_custom_env(gui=False, obs_mode="rel_pos"):
 
 # -------------------- Custom HoverAviary --------------------
 class CustomHoverAviary(HoverAviary):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        
+        # PPO가 내부 env에서 접근할 때를 대비해 기본값 생성
+        self.prev_action = np.zeros(4, dtype=np.float32)
+        self.SPEED_LIMIT = 10.0
     def _computeTerminated(self):
         return False  # 성공 조건 무시 (학습 목적이면 직접 정의해도 됨)
 
@@ -64,100 +72,82 @@ class MovingTargetWrapper(gym.Wrapper):
     - 사각형 범위 내에서 자동으로 움직이도록 합니다.
     - 드론 시점의 카메라 RGB 이미지를 관측으로 반환합니다.
     """
-    def __init__(self, env,
-                 obs_mode="rel_pos",      # "rgb"/"rel_pos"/"both"
+    def __init__(self,
+                 env,
+                 obs_mode="rel_pos",
                  camera_size=(84, 84),
-                 fov_deg=90.0, near=0.02, far=20.0,
-                 init_target_z=0.25,
-                 target_urdf="cube.urdf", target_rgba=(1.0, 0.2, 0.2, 1.0),
-                 x_max=50.0, y_max=50.0,  # 타겟 이동 가능 범위(수평)
-                 speed=0.01,
-
-                 # ---- 추가: 보상/종료 파라미터 ----
-                 desired_alt_above=10.0,  # 타겟 '상공' 목표 고도 차
-                 xy_tol=1.5,              # 성공 밴드(수평)
-                 z_tol=1.0,               # 성공 밴드(수직)
-                 max_xy=30.0,             # 너무 멀어지면 종료
-                 min_z=0.2,               # 거의 충돌 수준
-                 alive_bonus=0.05,        # 매 스텝 생존 보너스
-                 w_xy=5.0,                # 수평 오차 가중치
-                 w_z=3.5,                 # 수직 오차 가중치
-                 w_act=0.001,             # 액션 크기 패널티
-                 w_vel=0.001,             # 드론 속도 패널티(선택)
-                 success_reward=2.0,      # 성공 밴드 안이면 추가 보상
-                 patience_steps=180       # 일정 시간 너무 멀면 종료
+                 init_target_z=0.03,
+                 x_max=25.0, # 자동차 활동 반경
+                 y_max=25.0,
                  ):
         super().__init__(env)
         self.obs_mode = obs_mode
-        # 보상/종료 파라미터 저장
-        self.desired_alt_above = float(desired_alt_above)
-        self.xy_tol = float(xy_tol)
-        self.z_tol = float(z_tol)
-        self.max_xy = float(max_xy)
-        self.min_z = float(min_z)
-        self.alive_bonus = float(alive_bonus)
-        self.w_xy = float(w_xy)
-        self.w_z = float(w_z)
-        self.w_act = float(w_act)
-        self.w_vel = float(w_vel)
-        self.success_reward = float(success_reward)
-        self.patience_steps = int(patience_steps)
-        # 내부 상태
-        self._far_counter = 0
-        # PyBullet 리소스 경로
-        p.setAdditionalSearchPath(pybullet_data.getDataPath())
+        
+        # =====================================================================
+        # 1. 보상 및 종료 하이퍼파라미터 정의
+        # =====================================================================
+        # 이 값들을 조정하여 에이전트의 학습 방향을 튜닝할 수 있습니다.
+        self.w_dist     = 10.0      # (핵심) 거리 보상 가중치
+        self.w_approach = 1.0     # 접근 속도 보상 가중치
+        self.w_speed    = 0.05     # 드론 속도 페널티 가중치
+        self.w_alt      = 0.1      # 고도 페널티 가중치
+        self.w_ang_vel = 0.01      # 각속도 페널티 가중치
+        self.w_action_rate = 0.01  # 행동 변화율 페널티 가중치
+        
+        self.desired_dist    = 2.0     # 목표 유지 거리 [m]
+        self.dist_sharpness  = 0.5     # 거리 보상 곡선의 뾰족함 정도 (값이 클수록 좁고 뾰족해짐)
+        
+        self.max_drone_speed = 10.0     # 페널티가 시작되는 드론 속도 [m/s]
+        self.alt_range       = [1.8, 2.2] # 이상적인 고도 범위 [m]
 
-        # 타겟 관련 설정
+        self.min_dist_fail   = 0.5      # 실패(너무 가까움) 기준 [m]
+        self.max_dist_fail   = 6.0     # 실패(너무 멂) 기준 [m]
+        self.min_z_crash     = 0.2      # 실패(추락) 기준 [m]
+        
+        self.dt = self.env.unwrapped.CTRL_TIMESTEP
+
+        # =====================================================================
+        # 2. PyBullet 및 환경 기본 설정
+        # =====================================================================
+        p.setAdditionalSearchPath(pybullet_data.getDataPath())
         self.init_target_z = float(init_target_z)
         self._target_id = None
-        self._target_urdf = target_urdf
-        self._target_rgba = target_rgba
+        self._target_urdf = "cube_small.urdf"
         self._client = getattr(self.env.unwrapped, "CLIENT", 0)
+        self._drone_id = getattr(self.env.unwrapped, "DRONE_IDS", [0])[0]
 
-        # 드론 핸들
-        drone_ids = getattr(self.env.unwrapped, "DRONE_IDS", None)
-        self._drone_id = drone_ids[0] if drone_ids else None
-
-        # 카메라 설정
+        # =====================================================================
+        # 3. 카메라 및 관측/행동 공간 정의
+        # =====================================================================
         self.W, self.H = int(camera_size[0]), int(camera_size[1])
-        self.fov = fov_deg
-        aspect = self.W / float(self.H)
-        self._proj = p.computeProjectionMatrixFOV(
-            fov=self.fov, aspect=aspect, nearVal=near, farVal=far
-        )
-        self._img_flags = p.ER_SEGMENTATION_MASK_OBJECT_AND_LINKINDEX
-
-        # 관측/행동 공간        
+        self._proj = p.computeProjectionMatrixFOV(fov=90.0, aspect=self.W/self.H, nearVal=0.02, farVal=20.0)
+        
         if self.obs_mode == "rgb":
-            self.observation_space = spaces.Box(
-                low=0, high=255, shape=(self.H, self.W, 3), dtype=np.uint8
-            )
+            self.observation_space = spaces.Box(low=0, high=255, shape=(self.H, self.W, 3), dtype=np.uint8)
         elif self.obs_mode == "rel_pos":
-            # 상대위치(3) + 선속도(3) + 각속도(3) =9
-            self.observation_space = spaces.Box(
-                low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32
-            )
+            self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(13,), dtype=np.float32)
         elif self.obs_mode == "both":
             self.observation_space = spaces.Dict({
                 "rgb": spaces.Box(low=0, high=255, shape=(self.H, self.W, 3), dtype=np.uint8),
-                # rel_pos 부분의 shape을 9로 변경. 상대위치(3) + 선속도(3) + 각속도(3) = 9
                 "rel_pos": spaces.Box(low=-np.inf, high=np.inf, shape=(9,), dtype=np.float32)
             })
         self.action_space = self.env.action_space
 
-
-        # 움직임 관련
-        self.max_speed = 2.0        # 자동차의 최대 속도
-        self.max_accel = 1.0       # 최대 가속/감속
-        self.max_turn_rate = 0.05    # 최대 회전율 (라디안)
-        
-        self.speed = 0.05            # 현재 속도
-        self.angle = np.random.uniform(0, 2 * np.pi) # 현재 진행 방향 (각도)
-        self.turn_rate = 0.0         # 현재 회전율
-        self.accel = 0.0             # 현재 가속도
-
+        # =====================================================================
+        # 4. 자동차(타겟) 움직임 관련 변수 초기화
+        # =====================================================================
         self.x_max, self.y_max = x_max, y_max
         self.target_pos = np.array([0.0, 0.0, self.init_target_z])
+        
+        self.min_speed = 0.5
+        self.max_speed = 2.0
+        self.max_accel = 0.1
+        self.max_turn_rate = 0.1
+        
+        self.speed = np.random.uniform(self.min_speed, self.max_speed)
+        self.angle = np.random.uniform(0, 2 * np.pi)
+        self.turn_rate = np.random.uniform(-self.max_turn_rate, self.max_turn_rate)
+        self.accel = np.random.uniform(-self.max_accel, self.max_accel)
 
     # -------------------- 타겟 관련 --------------------
     def _spawn_or_reset_target(self, pos, orn):
@@ -169,7 +159,7 @@ class MovingTargetWrapper(gym.Wrapper):
                 orn,
                 useFixedBase=False,
                 physicsClientId=self._client,
-                globalScaling=0.5,
+                globalScaling=1.0,
             )
 
             # 텍스처 적용 코드 추가
@@ -205,8 +195,8 @@ class MovingTargetWrapper(gym.Wrapper):
     def _update_target(self):
         """경계 내에서 타겟 위치를 부드럽고 임의적으로 업데이트"""
         # 1. 가속도와 회전율에 작은 임의의 변화를 줍니다.
-        self.accel += np.random.uniform(-0.001, 0.001)
-        self.turn_rate += np.random.uniform(-0.01, 0.01)
+        self.accel += np.random.uniform(-0.01, 0.01)
+        self.turn_rate += np.random.uniform(-0.05, 0.05)
         
         # 2. 가속도와 회전율을 최대값으로 제한합니다.
         self.accel = np.clip(self.accel, -self.max_accel, self.max_accel)
@@ -214,7 +204,7 @@ class MovingTargetWrapper(gym.Wrapper):
 
         # 3. 현재 속도와 진행 방향 각도를 업데이트합니다.
         self.speed += self.accel
-        self.speed = np.clip(self.speed, 0, self.max_speed) # 속도는 0 이상, 최대 속도 이하
+        self.speed = np.clip(self.speed, self.min_speed, self.max_speed) # 속도는 0 이상, 최대 속도 이하
         self.angle = (self.angle + self.turn_rate) % (2 * np.pi) # 각도는 0 ~ 2pi
 
         # 4. 새로운 속도 벡터(vx, vy)를 계산합니다.
@@ -222,7 +212,6 @@ class MovingTargetWrapper(gym.Wrapper):
         vy = self.speed * np.sin(self.angle)
 
         # 5. 새로운 위치를 계산합니다.
-        self.dt = 1.0/240.0
         self.target_pos[0] += vx * self.dt
         self.target_pos[1] += vy * self.dt
 
@@ -284,8 +273,23 @@ class MovingTargetWrapper(gym.Wrapper):
         # 이전 타겟 ID는 더 이상 유효하지 않습니다. None으로 초기화합니다.
         self._target_id = None
         
+        #타겟 위치 랜덤성
         orn = p.getQuaternionFromEuler([0.0, 0.0, 0.0])
-        self._spawn_or_reset_target([0.0, 0.0, self.init_target_z], orn)
+        tx = np.random.uniform(-5.0, 5.0)
+        ty = np.random.uniform(-5.0, 5.0)
+        self._spawn_or_reset_target([tx, ty, self.init_target_z], orn)
+
+        # 드론 시작 위치도 랜덤하게 (타겟과 일정 거리 유지)
+        rand_r = np.random.uniform(0.0, 2.0)
+        rand_th = np.random.uniform(0, 2*np.pi)
+        dx, dy = rand_r * np.cos(rand_th), rand_r * np.sin(rand_th)
+        drone_pos0 = np.array([dx, dy, np.random.uniform(2.0, 3.0)])
+        p.resetBasePositionAndOrientation(
+            self._drone_id,
+            drone_pos0.tolist(),
+            p.getQuaternionFromEuler([0, 0, 0]),
+            physicsClientId=self._client
+        )
 
         # 랜덤 속도 초기화
         self.target_vel = np.random.uniform(-self.speed, self.speed, size=2)
@@ -301,8 +305,9 @@ class MovingTargetWrapper(gym.Wrapper):
 
         # 자기인식 정보 추가: 드론의 속도와 각속도
         lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
-        full_obs_vector = np.concatenate([rel_pos, lin_vel, ang_vel]).astype(np.float32)
-
+        self.prev_action = np.zeros(4, dtype=np.float32)
+        full_obs_vector = np.concatenate([rel_pos, lin_vel, ang_vel, self.prev_action.flatten()]).astype(np.float32)
+        
         # obs 모드별 반환
         if self.obs_mode == "rgb":
             rgb = self._render_rgb()
@@ -317,99 +322,96 @@ class MovingTargetWrapper(gym.Wrapper):
 
 
     def step(self, action):
-        # 1. 에이전트의 행동을 실제 환경에 적용하고, 타겟을 움직입니다.
-        obs_base, reward_base, term_base, trunc_base, info = self.env.step(action)
+        # 1. 하위 환경 실행 및 타겟 업데이트
+        obs_base, _, term_base, trunc_base, info = self.env.step(action)
+        self._update_target()
         
-        prev_target_pos = self.target_pos.copy()
-        prev_drone_pos, _ = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
-        prev_dist = np.linalg.norm(np.array(prev_target_pos[:2]) - np.array(prev_drone_pos[:2]))
-        self._update_target() 
+        
 
-        # 2. 행동 후의 새로운 상태 정보를 가져옵니다.
-        drone_pos, drone_quat = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
+        # 2. 드론 및 타겟 상태 정보 수집
+        drone_pos, _ = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
         target_pos, _ = p.getBasePositionAndOrientation(self._target_id, physicsClientId=self._client)
+        rel_pos = np.array(target_pos) - np.array(drone_pos)
         lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
 
-        # 3. 보상 및 종료 조건 계산에 필요한 값들을 정의합니다.
         dist_vec = np.array(target_pos) - np.array(drone_pos)
+        dist_3d = np.linalg.norm(dist_vec)
         dist_xy = np.linalg.norm(dist_vec[:2])
-        dist_z = dist_vec[2] # Z축 거리 (부호 있음)
+        if not hasattr(self, "_prev_dist"):
+            self._prev_dist = dist_3d
+
+        # 3. 보상(Reward) 계산
+        reward = 0.0
+        reward += 0.005  # Alive Bonus
+
+        # (A) 거리 보상 (종 모양 곡선): 목표 거리에 가까울수록 보상이 커짐
+        error = dist_3d - self.desired_dist
+        #error = dist_xy - self.desired_dist
+        dist_reward = np.exp(-self.dist_sharpness * (error**2))
+        reward += self.w_dist * dist_reward
         
-        # =====================================================================
-        # ===== 개선된 보상 함수 로직 =====
-        # =====================================================================
-        reward = self.alive_bonus # 살아있으면 매 스텝 기본 점수
+        # (B) 접근 속도 보상: 타겟 방향으로 움직이면 보너스
+        if dist_xy > 1e-6:
+            approach_speed = np.dot(lin_vel[:2], dist_vec[:2] / dist_xy)
+            reward += self.w_approach * approach_speed
 
-        curr_dist = np.linalg.norm(np.array(target_pos[:2]) - np.array(drone_pos[:2]))
-        reward += (prev_dist - curr_dist) * 3.0   # ← distance 변화 보상 추가 (가중치 3~5)
-
-        # [개선 1] 거리 오차에 대한 페널티 (Gaussian-like)
-        # 수평(xy) 거리 오차: 목표는 타겟 바로 위(xy 오차 0)
-        xy_error = dist_xy
-        reward -= self.w_xy * (1 - np.exp(-0.5 * xy_error**2))
-
-        # 수직(z) 거리 오차: 목표는 타겟보다 desired_alt_above 만큼 위에 있는 것
-        z_error = abs((drone_pos[2] - target_pos[2]) - self.desired_alt_above)
-        reward -= self.w_z * (1 - np.exp(-0.5 * z_error**2))
-
-        # [개선 2] 드론의 자세(Yaw) 페널티
-        # 드론의 전방 벡터 계산
-        rot_matrix = np.array(p.getMatrixFromQuaternion(drone_quat)).reshape(3, 3)
-        fwd_vec = rot_matrix[:, 0]  # X축이 전방
+        progress = self._prev_dist - dist_3d
+        reward += 0.1 * progress   # 가중치(0.3~1.0)로 조절
+        self._prev_dist = dist_3d
+            
+        # (C) 속도 페널티: 너무 빠르게 움직이면 페널티
+        speed = np.linalg.norm(lin_vel)
+        speed_margin = max(0, speed - self.max_drone_speed)
+        reward -= self.w_speed * speed_margin
         
-        # 드론의 전방 벡터와 타겟 방향 벡터 사이의 각도 오차 계산
-        target_dir_vec = dist_vec / (np.linalg.norm(dist_vec) + 1e-6)
-        orientation_error = 1 - np.dot(fwd_vec[:2], target_dir_vec[:2]) # 수평(XY) 평면에서만 고려
-        reward -= 0.1 * orientation_error # 가중치 0.1 (조정 가능)
+        # (D) 고도 페널티: 이상적인 고도 범위를 벗어나면 페널티
+        alt_margin = max(0, self.alt_range[0] - drone_pos[2]) + max(0, drone_pos[2] - self.alt_range[1])
+        reward -= self.w_alt * alt_margin
 
-        # [개선 3] 제어 입력(Action) 및 속도 페널티
-        reward -= self.w_act * np.linalg.norm(action)
-        reward -= self.w_vel * np.linalg.norm(lin_vel)
+        # (E) 행동 페널티: 너무 큰 행동을 취하면 페널티
+        action_penalty = np.linalg.norm(action) # 행동 벡터의 크기
+        reward -= 0.01 * action_penalty # 작은 가중치를 곱해 페널티로 사용
 
-        # [개선 4] 성공 보너스
-        # 수평 및 수직 오차가 허용 범위(tolerance) 안에 들어오면 추가 보상
-        is_success = (xy_error < self.xy_tol) and (z_error < self.z_tol)
-        if is_success:
-            reward += self.success_reward
+        # (F) 각속도 페널티 추가
+        ang_vel_norm = np.linalg.norm(ang_vel)
+        reward -= self.w_ang_vel * ang_vel_norm
+
+        # (G) 행동 변화율 페널티 추가
+        action_diff = action - self.prev_action
+        action_rate_penalty = np.linalg.norm(action_diff)
+        reward -= self.w_action_rate * action_rate_penalty
+
+        # 4. 종료(Termination) 조건 계산
+        terminated = False
+        fail_far = (dist_3d > self.max_dist_fail)
+        fail_close = (dist_3d < self.min_dist_fail)
+        fail_crash = (drone_pos[2] <= self.min_z_crash)
         
-        # =====================================================================
-
-        # 5. 에피소드 종료 조건을 계산합니다.
-        # 너무 멀어지면 종료
-        if dist_xy > self.max_xy:
-            self._far_counter += 1
-        else:
-            self._far_counter = 0
+        # 실패 조건 중 하나라도 만족하면 에피소드 종료 및 페널티 부과
+        if fail_far or fail_close or fail_crash:
+            reward -= 10.0
+            terminated = True
         
-        # 기존 충돌 조건 + 너무 멀리 떨어져 있는 시간이 길어지면 종료
-        terminated = bool(term_base or (drone_pos[2] <= self.min_z) or (self._far_counter > self.patience_steps))
+        # 하위 환경의 종료 신호(term_base)를 반영
+        if not terminated:
+            terminated = bool(term_base)
+        # 하위 환경의 시간 초과 신호(trunc_base)를 반영
         truncated = bool(trunc_base)
 
-        # 6. 에이전트에게 전달할 관측(Observation) 정보를 구성합니다.
+        # 5. 관측(Observation) 정보 구성 및 반환
         rel_pos = dist_vec
-        full_obs_vector = np.concatenate([rel_pos, lin_vel, ang_vel]).astype(np.float32)
-
+        full_obs_vector = np.concatenate([rel_pos, lin_vel, ang_vel, self.prev_action.flatten()]).astype(np.float32)
+        self.prev_action = np.array(action).flatten()
         if self.obs_mode == "rgb":
-            rgb = self._render_rgb()
-            obs = rgb
+            obs = self._render_rgb()
         elif self.obs_mode == "rel_pos":
             obs = full_obs_vector
         elif self.obs_mode == "both":
-            rgb = self._render_rgb()
-            obs = {"rgb": rgb, "rel_pos": full_obs_vector}
-        else: # 기본값 설정
+            obs = {"rgb": self._render_rgb(), "rel_pos": full_obs_vector}
+        else:
             obs = full_obs_vector
-
-        # 7. Info 딕셔너리에 디버깅 정보 추가
-        info['reward_breakdown'] = {
-            'xy_error': -self.w_xy * (1 - np.exp(-0.5 * xy_error**2)),
-            'z_error': -self.w_z * (1 - np.exp(-0.5 * z_error**2)),
-            'orientation_error': -0.1 * orientation_error,
-            'success_bonus': self.success_reward if is_success else 0.0
-        }
-
-        # 8. 최종 계산된 값들을 반환합니다.
-        return obs, float(reward), terminated, truncated, info
+            
+        return obs, float(reward), bool(terminated), bool(truncated), info
 
 
     
@@ -447,7 +449,7 @@ class TextureWrapper(gym.Wrapper):
 if __name__ == "__main__":
     
     # 1) 기본 환경 생성
-    INIT_XYZS = np.array([[0, 0, 10.0]])
+    INIT_XYZS = np.array([[0, 0, 2.0]])
     base_env = CustomHoverAviary(gui=True,
                                 initial_xyzs=INIT_XYZS,
                                 act=ActionType.VEL)
@@ -470,12 +472,15 @@ if __name__ == "__main__":
         cameraTargetPosition=[0, 0, 0] # 카메라가 바라보는 지점 (월드 좌표)
     )
     # --- 테스트 루프 ---
+    TIMESTEP = env.CTRL_TIMESTEP
     obs, info = env.reset()
     print(f"Observation space: {env.observation_space}")
     print(f"Action space shape: {env.action_space.shape}")
     
     t0 = time.time()
     ep_len = 0
+    start_time = time.time()
+
     while time.time() - t0 < 60: # 60초 동안 테스트
         a = env.action_space.sample() # 랜덤 행동
         obs, r, term, trunc, info = env.step(a)
@@ -504,7 +509,7 @@ if __name__ == "__main__":
             obs, info = env.reset()
             ep_len = 0
         
-        time.sleep(10./240.)
+        sync(ep_len, start_time, TIMESTEP)
             
     env.close()
     print("done.")

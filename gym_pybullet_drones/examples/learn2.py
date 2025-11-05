@@ -57,7 +57,7 @@ if __name__ == "__main__":
     )
 
     # ---------------- 콜백 ----------------
-    callback_on_best = StopTrainingOnRewardThreshold(reward_threshold=20000, verbose=1)
+    callback_on_best = StopTrainingOnRewardThreshold(reward_threshold=100000, verbose=1)
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path="./models_multi/",
@@ -69,7 +69,7 @@ if __name__ == "__main__":
     )
 
     # ---------------- 학습 실행 ----------------
-    model.learn(total_timesteps=500_000, callback=eval_callback)
+    model.learn(total_timesteps=1000_000, callback=eval_callback)
 
     # ---------------- 모델 저장 ----------------
     model.save("ppo_drone_multi_final")
