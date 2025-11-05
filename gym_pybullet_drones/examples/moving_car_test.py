@@ -86,19 +86,19 @@ class MovingTargetWrapper(gym.Wrapper):
         # 1. 보상 및 종료 하이퍼파라미터 정의
         # =====================================================================
         # 이 값들을 조정하여 에이전트의 학습 방향을 튜닝할 수 있습니다.
-        self.w_dist     = 1.0      # (핵심) 거리 보상 가중치
-        self.w_approach = 0.2      # 접근 속도 보상 가중치
+        self.w_dist     = 10.0      # (핵심) 거리 보상 가중치
+        self.w_approach = 1.0     # 접근 속도 보상 가중치
         self.w_speed    = 0.05     # 드론 속도 페널티 가중치
         self.w_alt      = 0.1      # 고도 페널티 가중치
         
         self.desired_dist    = 2.0     # 목표 유지 거리 [m]
-        self.dist_sharpness  = 0.1      # 거리 보상 곡선의 뾰족함 정도 (값이 클수록 좁고 뾰족해짐)
+        self.dist_sharpness  = 0.5      # 거리 보상 곡선의 뾰족함 정도 (값이 클수록 좁고 뾰족해짐)
         
         self.max_drone_speed = 10.0     # 페널티가 시작되는 드론 속도 [m/s]
-        self.alt_range       = [1.0, 5.0] # 이상적인 고도 범위 [m]
+        self.alt_range       = [1.0, 3.0] # 이상적인 고도 범위 [m]
 
         self.min_dist_fail   = 0.5      # 실패(너무 가까움) 기준 [m]
-        self.max_dist_fail   = 10.0     # 실패(너무 멂) 기준 [m]
+        self.max_dist_fail   = 6.0     # 실패(너무 멂) 기준 [m]
         self.min_z_crash     = 0.2      # 실패(추락) 기준 [m]
         
         self.dt = self.env.unwrapped.CTRL_TIMESTEP
@@ -136,14 +136,15 @@ class MovingTargetWrapper(gym.Wrapper):
         self.x_max, self.y_max = x_max, y_max
         self.target_pos = np.array([0.0, 0.0, self.init_target_z])
         
+        self.min_speed = 0.5
         self.max_speed = 2.0
-        self.max_accel = 0.05
-        self.max_turn_rate = 0.05
+        self.max_accel = 0.1
+        self.max_turn_rate = 0.1
         
-        self.speed = 0.05
+        self.speed = np.random.uniform(self.min_speed, self.max_speed)
         self.angle = np.random.uniform(0, 2 * np.pi)
-        self.turn_rate = 0.0
-        self.accel = 0.0
+        self.turn_rate = np.random.uniform(-self.max_turn_rate, self.max_turn_rate)
+        self.accel = np.random.uniform(-self.max_accel, self.max_accel)
 
     # -------------------- 타겟 관련 --------------------
     def _spawn_or_reset_target(self, pos, orn):
@@ -191,8 +192,8 @@ class MovingTargetWrapper(gym.Wrapper):
     def _update_target(self):
         """경계 내에서 타겟 위치를 부드럽고 임의적으로 업데이트"""
         # 1. 가속도와 회전율에 작은 임의의 변화를 줍니다.
-        self.accel += np.random.uniform(-0.001, 0.001)
-        self.turn_rate += np.random.uniform(-0.01, 0.01)
+        self.accel += np.random.uniform(-0.01, 0.01)
+        self.turn_rate += np.random.uniform(-0.05, 0.05)
         
         # 2. 가속도와 회전율을 최대값으로 제한합니다.
         self.accel = np.clip(self.accel, -self.max_accel, self.max_accel)
@@ -200,7 +201,7 @@ class MovingTargetWrapper(gym.Wrapper):
 
         # 3. 현재 속도와 진행 방향 각도를 업데이트합니다.
         self.speed += self.accel
-        self.speed = np.clip(self.speed, 0, self.max_speed) # 속도는 0 이상, 최대 속도 이하
+        self.speed = np.clip(self.speed, self.min_speed, self.max_speed) # 속도는 0 이상, 최대 속도 이하
         self.angle = (self.angle + self.turn_rate) % (2 * np.pi) # 각도는 0 ~ 2pi
 
         # 4. 새로운 속도 벡터(vx, vy)를 계산합니다.
@@ -351,7 +352,7 @@ class MovingTargetWrapper(gym.Wrapper):
             reward += self.w_approach * approach_speed
 
         progress = self._prev_dist - dist_3d
-        reward += 0.5 * progress   # 가중치(0.3~1.0)로 조절
+        reward += 0.1 * progress   # 가중치(0.3~1.0)로 조절
         self._prev_dist = dist_3d
             
         # (C) 속도 페널티: 너무 빠르게 움직이면 페널티
