@@ -87,14 +87,16 @@ class MovingTargetWrapper(gym.Wrapper):
         # 1. 보상 및 종료 하이퍼파라미터 정의
         # =====================================================================
         # 이 값들을 조정하여 에이전트의 학습 방향을 튜닝할 수 있습니다.
-        self.w_dist     = 10.0      # (핵심) 거리 보상 가중치
-        self.w_approach = 1.0     # 접근 속도 보상 가중치
+        self.w_dist     = 20.0      # (핵심) 거리 보상 가중치
+        self.w_approach = 2.0     # 접근 속도 보상 가중치
         self.w_speed    = 0.05     # 드론 속도 페널티 가중치
         self.w_alt      = 0.1      # 고도 페널티 가중치
         self.w_ang_vel = 0.05      # 각속도 페널티 가중치
         self.w_action_rate = 0.01  # 행동 변화율 페널티 가중치
         self.w_action = 0.02       # 행동 크기 페널티 가중치
         
+        self.w_heading = 0.5 #드론이 타겟을 바라보도록
+
         self.desired_dist    = 2.0     # 목표 유지 거리 [m]
         self.dist_sharpness  = 0.5     # 거리 보상 곡선의 뾰족함 정도 (값이 클수록 좁고 뾰족해짐)
         
@@ -330,7 +332,7 @@ class MovingTargetWrapper(gym.Wrapper):
         
 
         # 2. 드론 및 타겟 상태 정보 수집
-        drone_pos, _ = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
+        drone_pos, drone_orn = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
         target_pos, _ = p.getBasePositionAndOrientation(self._target_id, physicsClientId=self._client)
         rel_pos = np.array(target_pos) - np.array(drone_pos)
         lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
@@ -342,8 +344,8 @@ class MovingTargetWrapper(gym.Wrapper):
             self._prev_dist = dist_3d
 
         # 3. 보상(Reward) 계산
-        reward = 0.0
-        reward += 0.005  # Alive Bonus
+        #reward = 0.0
+        reward = 0.005  # Alive Bonus
 
         # (A) 거리 보상 (종 모양 곡선): 목표 거리에 가까울수록 보상이 커짐
         error = dist_3d - self.desired_dist
@@ -381,6 +383,22 @@ class MovingTargetWrapper(gym.Wrapper):
         action_diff = action - self.prev_action
         action_rate_penalty = np.linalg.norm(action_diff)
         reward -= self.w_action_rate * action_rate_penalty
+
+        # (H) 드론이 타겟을 바라보도록 유도하는 보상 추가
+        if dist_xy > 0.1: # 타겟이 너무 가까우면 계산 생략
+            # 1. 드론의 정면(local +X) 벡터를 계산
+            rot_matrix = np.array(p.getMatrixFromQuaternion(drone_orn)).reshape(3, 3)
+            drone_fwd_vec = rot_matrix @ np.array([1.0, 0.0, 0.0])
+            
+            # 2. XY 평면 벡터만 추출 및 정규화
+            drone_fwd_xy = drone_fwd_vec[:2] / np.linalg.norm(drone_fwd_vec[:2])
+            target_dir_xy = dist_vec[:2] / dist_xy
+            
+            # 3. 두 벡터의 내적(dot product)을 계산. (일치하면 1.0, 반대면 -1.0)
+            heading_alignment = np.dot(drone_fwd_xy, target_dir_xy)
+            
+            # 4. 보상에 추가 (0~1 사이 값으로 변환하여 보너스)
+            reward += self.w_heading * (heading_alignment + 1.0) / 2.0
 
         # 4. 종료(Termination) 조건 계산
         terminated = False

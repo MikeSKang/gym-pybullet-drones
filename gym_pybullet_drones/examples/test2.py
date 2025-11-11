@@ -8,7 +8,8 @@ from moving_car_test import make_custom_env
 from gym_pybullet_drones.utils.utils import sync
 
 # 1. 불러올 모델 파일의 경로
-MODEL_PATH = "ppo_drone_multi_final.zip"
+#MODEL_PATH = "ppo_drone_multi_final.zip"   # 학습 완료 후 저장된 모델 파일 경로
+MODEL_PATH = "./models_multi/best_model.zip"    #학습 도중 가장 성능이 좋았던 모델 파일 경로
 
 # 2. 학습할 때 사용했던 observation mode와 동일하게 설정해야 합니다.
 OBS_MODE = "rel_pos"
@@ -46,6 +47,8 @@ if __name__ == "__main__":
         start = time.time()
         obs, info = env.reset()
 
+        drone_id = env.unwrapped.DRONE_IDS[0]
+
         while not (terminated or truncated):
             # deterministic=True: 학습된 정책이 가장 좋다고 생각하는 행동을 항상 선택합니다.
             action, _states = model.predict(obs, deterministic=True)
@@ -54,7 +57,16 @@ if __name__ == "__main__":
             
             total_reward += reward
             steps += 1
+
+            drone_pos, _ = p.getBasePositionAndOrientation(drone_id, physicsClientId=env.unwrapped.CLIENT)
             
+            p.resetDebugVisualizerCamera(
+                cameraDistance=3,      # 드론과의 거리 유지
+                cameraYaw=0,           # 드론 기준 Yaw 각도 유지
+                cameraPitch=-70,        # 드론 기준 Pitch 각도 유지
+                cameraTargetPosition=drone_pos # 카메라가 드론을 바라보게 함
+            )
+
             sync(steps, start, TIMESTEP)
 
         print(f"에피소드 {episode + 1}: 총 보상 = {total_reward:.2f}, 스텝 수 = {steps}")
