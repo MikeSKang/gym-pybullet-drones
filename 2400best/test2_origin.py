@@ -17,7 +17,7 @@ MODEL_DIR = "./models_multi"
 # - final_vecnormalize.pkl
 MODEL_PATH = os.path.join(MODEL_DIR, "best_model.zip")
 VECNORM_CANDIDATES = [
-    os.path.join(MODEL_DIR, "vecnormalize.pkl"),
+    os.path.join(MODEL_DIR, "final_vecnormalize.pkl"),
     os.path.join(MODEL_DIR, "latest_vecnormalize.pkl"),
 ]
 
