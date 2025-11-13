@@ -2,7 +2,7 @@ import os
 import torch
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
+from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize, SubprocVecEnv
 from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold, BaseCallback, CheckpointCallback
 from collections import Counter
 
@@ -12,7 +12,11 @@ from moving_car_test import make_custom_env, MovingTargetWrapper
 
 #observation mode 설정
 obs_mode = "rel_pos"
-num_envs = 4
+# CPU 코어 수 기반으로 env 개수 설정 (최대 8 정도까지만)
+MAX_ENVS = 8
+cpu_count = os.cpu_count() or 4
+num_envs = min(cpu_count, MAX_ENVS)
+print(f"Using {num_envs} parallel envs with SubprocVecEnv")
 
 class PeriodicVecNormalizeSave(BaseCallback):
     """
@@ -72,14 +76,27 @@ if __name__ == "__main__":
     print(f"Using device: {device}")
 
     # ---------------- 환경 생성 ----------------
-    def make_env():
-        return make_custom_env(gui=False, obs_mode=obs_mode,  is_test_mode=False)
-
-    train_env = DummyVecEnv([make_env for _ in range(num_envs)])
+    def make_env(rank: int, seed: int = 0):
+        """
+        rank: 몇 번째 env인지 (0 ~ num_envs-1)
+        """
+        def _init():
+            env = make_custom_env(gui=False, obs_mode=obs_mode, is_test_mode=False)
+            # 시드 다르게 주고 싶으면
+            env.reset(seed=seed + rank)
+            return env
+        return _init
+    # train은 SubprocVecEnv로 병렬
+    train_env = SubprocVecEnv([make_env(i) for i in range(num_envs)])
     train_env = VecMonitor(train_env)
     train_env = VecNormalize(train_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
-    eval_env = DummyVecEnv([make_env for _ in range(num_envs)])
+    # eval은 속도 중요하지 않으니 DummyVecEnv 그대로 써도 되고, Subproc로 맞춰도 됨
+    def make_eval_env():
+        return make_custom_env(gui=False, obs_mode=obs_mode, is_test_mode=False)
+
+    
+    eval_env = DummyVecEnv([make_eval_env for _ in range(num_envs)])
     eval_env = VecMonitor(eval_env)
     eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0, training=False)
 
@@ -106,8 +123,8 @@ if __name__ == "__main__":
         verbose=1,
         tensorboard_log="./ppo_drone_tensorboard_multi/",       #terminal: tensorboard --logdir ./ppo_drone_tensorboard_multi/
         learning_rate=1e-4,
-        n_steps=2048,
-        batch_size=64,
+        n_steps=1024,
+        batch_size=256,
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
