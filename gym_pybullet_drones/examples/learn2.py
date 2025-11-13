@@ -2,30 +2,89 @@ import os
 import torch
 import numpy as np
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
-from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold
+from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor, VecNormalize
+from stable_baselines3.common.callbacks import EvalCallback, StopTrainingOnRewardThreshold, BaseCallback, CheckpointCallback
+from collections import Counter
+
 
 # 커스텀 환경 불러오기
 from moving_car_test import make_custom_env, MovingTargetWrapper
 
 #observation mode 설정
 obs_mode = "rel_pos"
+num_envs = 4
 
+class PeriodicVecNormalizeSave(BaseCallback):
+    """
+    VecNormalize 통계(.pkl)를 주기적으로 저장하는 콜백.
+    EvalCallback의 최고 점수 갱신 여부와 "상관없이" 저장합니다.
+    """
+    def __init__(self, save_path: str, freq: int, verbose=1):
+        super(PeriodicVecNormalizeSave, self).__init__(verbose)
+        self.save_path = save_path
+        self.freq = freq
+
+    def _on_step(self) -> bool:
+        # self.n_calls는 BaseCallback에 의해 1씩 증가하는 총 스텝 수입니다.
+        if self.n_calls % self.freq == 0:
+            if self.verbose > 0:
+                print(f"Saving VecNormalize statistics to {self.save_path} (step {self.n_calls})")
+            # self.training_env는 model.learn()에 전달된 train_env입니다.
+            self.training_env.save(self.save_path)
+        return True
+    
+class TerminationStatsCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+        self.counter = Counter()
+
+    def _on_step(self) -> bool:
+        # VecEnv라 dones, infos는 벡터 형태
+        dones = self.locals.get("dones", None)
+        infos = self.locals.get("infos", None)
+
+        if dones is not None and infos is not None:
+            for done, info in zip(dones, infos):
+                if done:
+                    reason = info.get("termination_reason", None)
+                    if reason is not None:
+                        self.counter[reason] += 1
+        return True
+
+    def _on_rollout_end(self) -> None:
+            # rollout 한 번 끝날 때마다 TensorBoard에 기록
+            total = sum(self.counter.values()) or 1
+            for reason, cnt in self.counter.items():
+                # 절대 횟수
+                self.logger.record(f"term_count/{reason}", float(cnt))
+                # 비율(%)도 보고 싶으면
+                self.logger.record(f"term_ratio/{reason}", float(cnt) / total)
+
+            # 다음 rollout을 위해 초기화
+            self.counter.clear()
+    
 if __name__ == "__main__":
     # ---------------- CUDA 선택 ----------------
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    device = "cpu"
+    if device == "cuda":
+        num_envs = 8  # CUDA 사용 시 병렬 환경 수 증가
+    #device = "cpu"
     print(f"Using device: {device}")
 
     # ---------------- 환경 생성 ----------------
     def make_env():
-        return make_custom_env(gui=False, obs_mode=obs_mode)
+        return make_custom_env(gui=False, obs_mode=obs_mode,  is_test_mode=False)
 
-    train_env = DummyVecEnv([make_env])
+    train_env = DummyVecEnv([make_env for _ in range(num_envs)])
     train_env = VecMonitor(train_env)
+    train_env = VecNormalize(train_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
-    eval_env = DummyVecEnv([make_env])
+    eval_env = DummyVecEnv([make_env for _ in range(num_envs)])
     eval_env = VecMonitor(eval_env)
+    eval_env = VecNormalize(eval_env, norm_obs=True, norm_reward=False, clip_obs=10.0, training=False)
+
+    eval_env.obs_rms = train_env.obs_rms
+    eval_env.ret_rms = train_env.ret_rms
 
 
     # ---------------------------
@@ -46,7 +105,7 @@ if __name__ == "__main__":
         env=train_env,
         verbose=1,
         tensorboard_log="./ppo_drone_tensorboard_multi/",       #terminal: tensorboard --logdir ./ppo_drone_tensorboard_multi/
-        learning_rate=3e-4,
+        learning_rate=1e-4,
         n_steps=2048,
         batch_size=64,
         gamma=0.99,
@@ -57,22 +116,41 @@ if __name__ == "__main__":
     )
 
     # ---------------- 콜백 ----------------
-    callback_on_best = StopTrainingOnRewardThreshold(reward_threshold=100000, verbose=1)
+    save_folder = "./models_multi/"
+    log_folder = "./logs_multi/"
+    # "최신" 통계 파일 경로 (주기적으로 덮어쓰기됨)
+    latest_vecnorm_path = os.path.join(save_folder, "latest_vecnormalize.pkl")
+    # "최종" 모델/통계 파일 경로
+    final_model_path = os.path.join(save_folder, "ppo_drone_multi_final")
+    final_vecnorm_path = os.path.join(save_folder, "final_vecnormalize.pkl")
+
     eval_callback = EvalCallback(
         eval_env,
-        best_model_save_path="./models_multi/",
-        log_path="./logs_multi/",
+        best_model_save_path=save_folder,
+        log_path=log_folder,
         eval_freq=5000,
+        n_eval_episodes=3,
         deterministic=True,
         render=False,
-        callback_on_new_best=callback_on_best
+        callback_on_new_best=None
     )
+    checkpoint_callback = CheckpointCallback(
+      save_freq=100000,
+      save_path=save_folder,
+      name_prefix="ppo_backup", # (결과: ppo_backup_10000_steps.zip)
+      save_vecnormalize=True   # (중요!) VecNormalize 사용 유무
+    )
+    # 3. (추가) "최신" 통계를 스텝마다 저장하는 콜백 생성(CheckpointCallback가 대체하므로 주석처리)
+    #periodic_save_cb = PeriodicVecNormalizeSave(save_path=latest_vecnorm_path, freq=100000)
+    # 4. (수정) callback 리스트에 두 콜백을 모두 전달
+    termination_stats_cb = TerminationStatsCallback()
 
-    # ---------------- 학습 실행 ----------------
-    model.learn(total_timesteps=1000_000, callback=eval_callback)
+    callback_list = [eval_callback, checkpoint_callback, termination_stats_cb]
+    model.learn(total_timesteps=100_000_000, callback=callback_list)
 
     # ---------------- 모델 저장 ----------------
-    model.save("ppo_drone_multi_final")
+    model.save(final_model_path)
+    train_env.save(final_vecnorm_path)
 
     # ---------------- 평가 ----------------
     obs = eval_env.reset()
