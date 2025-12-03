@@ -107,7 +107,7 @@ class MovingTargetWrapper(gym.Wrapper):
         self.max_drone_speed = 10.0    
 
         self.min_dist_fail = 0.5      
-        self.CAMERA_FOV_THRESHOLD = 60.0 
+        self.CAMERA_FOV_THRESHOLD = 45.0 
         self.max_z_fail = 5.0
         self.min_z_crash = 0.2      
         
@@ -267,7 +267,8 @@ class MovingTargetWrapper(gym.Wrapper):
             viewMatrix=view,
             projectionMatrix=self._proj,
             renderer=p.ER_BULLET_HARDWARE_OPENGL,
-            flags=self._img_flags,
+            # [수정] self._img_flags 대신 상수를 직접 사용
+            flags=p.ER_NO_SEGMENTATION_MASK, 
             physicsClientId=self._client,
         )
         rgb = np.reshape(rgb, (self.H, self.W, 4))[:, :, :3]
