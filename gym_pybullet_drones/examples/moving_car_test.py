@@ -20,7 +20,7 @@ from gym_pybullet_drones.utils.utils import sync
 def make_custom_env(gui=False, obs_mode="rel_pos", is_test_mode=False):
     INIT_XYZS = np.array([[0, 0, 2.0]])
     base_env = CustomHoverAviary(gui=gui, initial_xyzs=INIT_XYZS, act=ActionType.VEL)
-    base_env = TimeLimit(base_env, max_episode_steps=2400)
+    base_env = TimeLimit(base_env, max_episode_steps=900)
 
     env = MovingTargetWrapper(base_env, camera_size=(84, 84), obs_mode=obs_mode, is_test_mode=is_test_mode)
     env = TextureWrapper(env, "gym_pybullet_drones/examples/textures/floor1.jpg")
@@ -30,7 +30,7 @@ def make_custom_env(gui=False, obs_mode="rel_pos", is_test_mode=False):
 # -------------------- Custom HoverAviary --------------------
 class CustomHoverAviary(HoverAviary):
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs, ctrl_freq=30)
         
         # PPO가 내부 env에서 접근할 때를 대비해 기본값 생성
         self.prev_action = np.zeros(4, dtype=np.float32)
@@ -76,7 +76,7 @@ class MovingTargetWrapper(gym.Wrapper):
                  env,
                  obs_mode="rel_pos",
                  camera_size=(84, 84),
-                 init_target_z=0.03,
+                 init_target_z=0.2,
                  x_max=5.0, # 자동차 활동 반경
                  y_max=5.0,
                  is_test_mode=False
@@ -109,7 +109,8 @@ class MovingTargetWrapper(gym.Wrapper):
         self.min_dist_fail = 0.5      
         self.CAMERA_FOV_THRESHOLD = 45.0 
         self.max_z_fail = 5.0
-        self.min_z_crash = 0.2      
+        self.min_z_crash = 0.2    
+        self.lost_steps = 0  # 타겟 놓친 시간 카운터
         
         self.dt = self.env.unwrapped.CTRL_TIMESTEP
 
@@ -146,10 +147,10 @@ class MovingTargetWrapper(gym.Wrapper):
         self.x_max, self.y_max = x_max, y_max
         self.target_pos = np.array([0.0, 0.0, self.init_target_z])
         
-        self.min_speed = 0.5
-        self.max_speed = 1.0
-        self.max_accel = 0.1
-        self.max_turn_rate = 0.1
+        self.min_speed = 0.0
+        self.max_speed = 0.0
+        self.max_accel = 0.05
+        self.max_turn_rate = 0.05
         
         self.speed = np.random.uniform(self.min_speed, self.max_speed)
         self.angle = np.random.uniform(0, 2 * np.pi)
@@ -166,7 +167,7 @@ class MovingTargetWrapper(gym.Wrapper):
                 orn,
                 useFixedBase=False,
                 physicsClientId=self._client,
-                globalScaling=1.0,
+                globalScaling=6.0,
             )
 
             # 텍스처 적용 코드 추가
@@ -276,6 +277,7 @@ class MovingTargetWrapper(gym.Wrapper):
 
     # -------------------- Gym API --------------------
     def reset(self, **kwargs):
+        self.lost_steps = 0
         obs_base, info = self.env.reset(**kwargs)
         # self.env.reset()으로 시뮬레이션이 초기화되었으므로,
         # 이전 타겟 ID는 더 이상 유효하지 않습니다. None으로 초기화합니다.
@@ -432,16 +434,19 @@ class MovingTargetWrapper(gym.Wrapper):
             elif fail_z_limit:
                 term_reason = "too_high"
         elif fail_angle:
+            self.lost_steps += 1
             if self.is_test_mode:
                 # [테스트 모드]: 신호를 보내고 종료하지 않음
+                terminated = True
                 info['status'] = 'TARGET_LOST'
                 reward -= 10.0 # (타겟을 놓친 것에 대한 가벼운 페널티)
                 term_reason = "angle_lost_test"
             else:
-                # [학습 모드]: 즉시 종료하고 큰 페널티
                 reward -= 10.0
                 terminated = True
                 term_reason = "angle_lost_test"
+        else:
+            self.lost_steps = 0
         
         # 하위 환경의 종료 신호(term_base)를 반영
         if not terminated:
@@ -520,7 +525,7 @@ if __name__ == "__main__":
     base_env = CustomHoverAviary(gui=True,
                                 initial_xyzs=INIT_XYZS,
                                 act=ActionType.VEL)
-    base_env = TimeLimit(base_env, max_episode_steps=2400)
+    base_env = TimeLimit(base_env, max_episode_steps=300)
 
     # 2) MovingTargetWrapper로 타겟 추가
     env = MovingTargetWrapper(base_env, camera_size=(256, 256), obs_mode="rel_pos")

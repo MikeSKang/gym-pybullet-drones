@@ -20,7 +20,7 @@ from check import preprocess_rgb, letterbox_rgb, map_heatmap_to_search_linear, T
 # ---------------- 설 정 ----------------
 # [주의] 샴 네트워크를 여러 프로세스에서 띄우면 VRAM을 많이 씁니다.
 # VRAM이 부족하면 num_envs를 1 또는 2로 줄이세요.
-NUM_ENVS = 8
+NUM_ENVS = 12
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TOTAL_TIMESTEPS = 5_000_000
 
@@ -58,8 +58,8 @@ class SiameseTrainingWrapper(gym.Wrapper):
         self.dt = float(self.env.unwrapped.CTRL_TIMESTEP)
         
         # 카메라 파라미터 (wrapper.py와 동일하게 설정)
-        self.CAM_H_RES = 320.0
-        self.CAM_V_RES = 240.0
+        self.CAM_H_RES = 255.0
+        self.CAM_V_RES = 255.0
         self.CAM_CENTER_X = self.CAM_H_RES / 2.0
         self.CAM_CENTER_Y = self.CAM_V_RES / 2.0
         self.V_FOV_RAD = np.deg2rad(90.0)  #60 -> 90
@@ -74,11 +74,20 @@ class SiameseTrainingWrapper(gym.Wrapper):
         
         # 필터 강도 (0.0 ~ 1.0): 클수록 부드럽지만 반응이 느림
         # 0.1 ~ 0.2 정도 추천
-        self.alpha = 0.2
+        self.alpha = 0.3
+        # [수정 2] 좌표 스무딩용 변수 초기화
+        self.prev_sx = None
+        self.prev_sy = None
 
     def reset(self, **kwargs):
         # 환경 리셋 (moving_car_test의 reset은 obs를 반환하므로 받아둠)
         _, info = self.env.reset(**kwargs)
+
+        # [수정 3] 리셋 시 스무딩 변수도 초기화
+        self.prev_rel_pos = np.zeros(3, dtype=np.float32)
+        self.filtered_rel_vel = np.zeros(3, dtype=np.float32)
+        self.prev_sx = None
+        self.prev_sy = None
         
         # 속도 계산용 이전 위치 초기화
         self.prev_rel_pos = np.zeros(3, dtype=np.float32)
@@ -105,12 +114,39 @@ class SiameseTrainingWrapper(gym.Wrapper):
         # ---------------------------------------------------------------------------
         # 1. 255x255 해상도로 직접 촬영
         # ---------------------------------------------------------------------------
-        pos, orn = p.getBasePositionAndOrientation(self.drone_id, physicsClientId=self.client)
-        R = np.array(p.getMatrixFromQuaternion(orn)).reshape(3, 3)
+        # pos, orn = p.getBasePositionAndOrientation(self.drone_id, physicsClientId=self.client)
+        # R = np.array(p.getMatrixFromQuaternion(orn)).reshape(3, 3)
 
-        eye_pos = np.array(pos) + (R @ np.array([0, 0, -0.05]))
-        target_pos = eye_pos + (R @ np.array([0, 0, -1]))
-        up_vec = (R @ np.array([0, 1, 0]))
+        # eye_pos = np.array(pos) + (R @ np.array([0, 0, -0.05]))
+        # target_pos = eye_pos + (R @ np.array([0, 0, -1]))
+        # up_vec = (R @ np.array([0, 1, 0]))
+
+        # [수정 후] 소프트웨어 짐벌 적용 (Yaw만 반영, Pitch/Roll 무시)
+        pos, orn = p.getBasePositionAndOrientation(self.drone_id, physicsClientId=self.client)
+        
+        # 1. 쿼터니언에서 오일러 각도 추출 (Roll, Pitch, Yaw)
+        rpy = p.getEulerFromQuaternion(orn)
+        yaw = rpy[2] # 헤딩(Yaw)만 가져옴
+
+        # 2. Yaw 회전 행렬만 새로 생성 (Z축 회전)
+        cos_y = np.cos(yaw)
+        sin_y = np.sin(yaw)
+        R_yaw = np.array([
+            [cos_y, -sin_y, 0],
+            [sin_y,  cos_y, 0],
+            [0,      0,     1]
+        ])
+
+        # 3. 카메라 위치 및 방향 설정 (기울기 무시)
+        # eye_pos: 드론 위치에서 수직 아래로 5cm (드론이 기울어도 카메라는 수평 유지)
+        eye_pos = np.array(pos) + np.array([0, 0, -0.05])
+        
+        # target_pos: 카메라에서 수직 아래 (항상 바닥을 정면으로 봄)
+        target_pos = eye_pos + np.array([0, 0, -1.0])
+        
+        # up_vec: 이미지의 '위쪽'이 드론의 진행 방향(Yaw)을 따라가도록 설정
+        # (기존 코드가 Body Y축([0,1,0])을 up으로 썼으므로, Yaw 회전된 Y축 사용)
+        up_vec = R_yaw @ np.array([0, 1, 0])
 
         view_matrix = p.computeViewMatrix(eye_pos.tolist(), target_pos.tolist(), up_vec.tolist())
 
@@ -155,11 +191,23 @@ class SiameseTrainingWrapper(gym.Wrapper):
             4.255573, 58.647, 3.910728, 63.602,
             half_pixel=True
         )
-        
+        # [수정 4] 좌표 스무딩 적용 (test3.py와 동일 로직)
+        if self.prev_sx is not None:
+            smooth_factor = 0.4 # 값이 클수록 이전 값 비중이 높음 (부드러움)
+            sx = smooth_factor * self.prev_sx + (1 - smooth_factor) * sx
+            sy = smooth_factor * self.prev_sy + (1 - smooth_factor) * sy
+        self.prev_sx = sx
+        self.prev_sy = sy
         # [삭제됨] sx_orig = (sx - pad_x) / scale
         # 이미지가 원본 그 자체이므로 변환된 좌표가 곧 원본 좌표입니다.
         sx_orig = sx
         sy_orig = sy
+
+        resp_flat = resp.reshape(-1)
+        max_v = resp_flat.max()
+        mean_v = resp_flat.mean()
+        std_v = resp_flat.std() + 1e-6
+        conf = (max_v - mean_v) / std_v
 
         # ---------------------------------------------------------------------------
         # 4. 물리 거리 변환 (픽셀 -> 미터)
@@ -167,28 +215,62 @@ class SiameseTrainingWrapper(gym.Wrapper):
         drone_pos, drone_orn = p.getBasePositionAndOrientation(self.drone_id, physicsClientId=self.client)
         current_z = drone_pos[2]
         
+        # 타겟의 대략적인 높이 (환경 설정에 따라 0.2 ~ 0.5 등)
+        # moving_car_test.py의 init_target_z 값을 참고하여 설정하세요.
+        TARGET_HEIGHT = 0.2  
+        
+        # 카메라와 타겟 사이의 수직 거리 (Depth)
+        rel_height = max(0.1, current_z - TARGET_HEIGHT)
+
         # (255 해상도 기준 미터 변환)
-        ground_width_m = 2 * current_z * np.tan(self.V_FOV_RAD / 2) # 90도니까 2 * z * 1 = 2z
-        meters_per_pixel = ground_width_m / 255.0 # 가로세로 같음
+        ground_width_m = 2 * rel_height * np.tan(self.V_FOV_RAD / 2)
+        meters_per_pixel = ground_width_m / 255.0
 
         # 중심점 (127.5)
         center_pixel = 255.0 / 2.0
         
+        # [이미지 좌표계 -> 바디 좌표계]
+        # 이미지: X(우), Y(하)
+        # 바디: X(전방), Y(좌측)
+        # 이미지 상단(Y=0)에 있으면 -> error_y < 0 -> 드론 기준 전방(+) -> rel_body_x > 0
         error_y_pixels = sy_orig - center_pixel
-        rel_x = -error_y_pixels * meters_per_pixel 
+        rel_body_x = -error_y_pixels * meters_per_pixel 
         
+        # 이미지 우측(X=255)에 있으면 -> error_x > 0 -> 드론 기준 우측 -> rel_body_y < 0 (좌측이 +Y라면)
         error_x_pixels = sx_orig - center_pixel
-        rel_y = -error_x_pixels * meters_per_pixel 
+        rel_body_y = -error_x_pixels * meters_per_pixel
 
-        current_rel_pos = np.array([rel_x, rel_y, 0.0 - current_z], dtype=np.float32)
+        # ---------------------------------------------------------------------------
+        # [수정 핵심 1] Body Frame -> World Frame 좌표 변환
+        # ---------------------------------------------------------------------------
+        # 드론의 현재 Yaw 각도 구하기
+        rpy = p.getEulerFromQuaternion(drone_orn)
+        yaw = rpy[2]
+
+        # 2D 회전 행렬 적용
+        # World_X = Body_X * cos(yaw) - Body_Y * sin(yaw)
+        # World_Y = Body_X * sin(yaw) + Body_Y * cos(yaw)
+        rel_x_world = rel_body_x * np.cos(yaw) - rel_body_y * np.sin(yaw)
+        rel_y_world = rel_body_x * np.sin(yaw) + rel_body_y * np.cos(yaw)
+
+        # 최종 상대 좌표 (World Frame)
+        current_rel_pos = np.array([rel_x_world, rel_y_world, 0.0 - current_z], dtype=np.float32)
 
         # ---------------------------------------------------------------------------
         # 5. 속도 계산 및 반환 (이전과 동일)
         # ---------------------------------------------------------------------------
         raw_vel = (current_rel_pos - self.prev_rel_pos) / self.dt
         self.filtered_rel_vel = (self.alpha * raw_vel) + ((1 - self.alpha) * self.filtered_rel_vel) #상대속도에 Low-Pass Filter 적용
-        # final_vel = np.clip(self.filtered_rel_vel, -2.0, 2.0)
-        final_vel = self.filtered_rel_vel.copy()
+        # [추가] 신뢰도가 너무 낮으면(타겟 놓침) 속도 정보를 0으로 죽여버림
+        # 이렇게 하면 드론이 엉뚱한 곳으로 급발진하는 것을 막음
+        if conf < 2.5:  # 기준값은 상황에 맞춰 조정 (2.5 ~ 3.0)
+            final_vel = np.zeros(3, dtype=np.float32)
+        # 너무 작은 속도는 0으로 처리 (노이즈 제거용 데드존)
+        else:
+            if np.linalg.norm(self.filtered_rel_vel) < 0.05:
+                self.filtered_rel_vel = np.zeros(3)
+            final_vel = np.clip(self.filtered_rel_vel, -4.0, 4.0)
+        #final_vel = self.filtered_rel_vel.copy()
         self.prev_rel_pos = current_rel_pos 
 
         lin_vel, ang_vel = p.getBaseVelocity(self.drone_id, physicsClientId=self.client)
@@ -270,6 +352,7 @@ if __name__ == "__main__":
         # 파일에서 통계(평균, 분산)를 불러와서 환경에 적용
         train_env = VecNormalize.load(STATS_PATH, train_env)
         # 중요: 새로운 환경(비전)에 적응해야 하므로 통계 업데이트는 켭니다 (training=True)
+        #fine-tuning에서는 training=False
         train_env.training = True 
         train_env.norm_reward = False 
     else:
@@ -292,8 +375,13 @@ if __name__ == "__main__":
             MODEL_PATH,
             env=train_env,
             device=DEVICE, # 기존 코드에 cpu로 되어있던데, 가급적 cuda(DEVICE) 추천
+            batch_size=2048,
+            n_steps=2048,
+            n_epochs=6,
             custom_objects={
-                "learning_rate": 1e-5, # [중요] 이미 똑똑하니까 살살 가르칩니다 (기존 1e-4 -> 1e-5)
+                "learning_rate": 5e-5,
+                "ent_coef": 0.01,
+                "clip_range": 0.1,
                 "tensorboard_log": os.path.join(OUTPUT_FOLDER, "tb_logs")
             }
         )
@@ -324,7 +412,7 @@ if __name__ == "__main__":
     )
     
     checkpoint_callback = CheckpointCallback(
-        save_freq=50000,
+        save_freq=max(50000 // NUM_ENVS, 1),
         save_path=OUTPUT_FOLDER,
         name_prefix="ppo_siamese",
         save_vecnormalize=True

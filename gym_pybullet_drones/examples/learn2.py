@@ -163,7 +163,7 @@ if __name__ == "__main__":
     termination_stats_cb = TerminationStatsCallback()
 
     callback_list = [eval_callback, checkpoint_callback, termination_stats_cb]
-    model.learn(total_timesteps=100_000_000, callback=callback_list)
+    model.learn(total_timesteps=10_000_000, callback=callback_list)
 
     # ---------------- 모델 저장 ----------------
     model.save(final_model_path)

@@ -9,7 +9,7 @@ from moving_car_test import make_custom_env
 from gym_pybullet_drones.utils.utils import sync
 
 # ---------------- 경로 설정 ----------------
-MODEL_DIR = "./models_multi"
+MODEL_DIR = "./2400best"
 # learn2.py에서 저장한 것들:
 # - best_model.zip
 # - ppo_drone_multi_final.zip
@@ -59,6 +59,14 @@ if __name__ == "__main__":
     # vec_env -> DummyVecEnv -> 실제 env
     base_env = vec_env.venv.envs[0]
     TIMESTEP = base_env.CTRL_TIMESTEP
+
+    # [추가된 부분] 현재 환경의 주파수(Hz) 확인 및 출력 ========================
+    current_freq = base_env.CTRL_FREQ
+    print(f"\n========================================")
+    print(f"[INFO] 현재 환경 제어 주파수: {current_freq} Hz")
+    print(f"[INFO] 1 스텝당 시간: {1/current_freq:.4f} 초")
+    print(f"========================================\n")
+    # ======================================================================
 
     # 디버깅 카메라 초기 위치
     p.resetDebugVisualizerCamera(
