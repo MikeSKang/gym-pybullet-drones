@@ -147,8 +147,8 @@ class MovingTargetWrapper(gym.Wrapper):
         self.x_max, self.y_max = x_max, y_max
         self.target_pos = np.array([0.0, 0.0, self.init_target_z])
         
-        self.min_speed = 0.0
-        self.max_speed = 0.0
+        self.min_speed = 0.1
+        self.max_speed = 0.8
         self.max_accel = 0.05
         self.max_turn_rate = 0.05
         
