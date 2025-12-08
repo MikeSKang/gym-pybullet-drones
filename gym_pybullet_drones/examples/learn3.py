@@ -17,6 +17,8 @@ from moving_car_test import make_custom_env, MovingTargetWrapper
 from model import SiameseNet, BaselineEmbeddingNet
 from check import preprocess_rgb, letterbox_rgb, map_heatmap_to_search_linear, TEMPLATE_SIZE
 
+#terminal: tensorboard --logdir .\gym_pybullet_drones\examples\results_learn3\tb_logs
+
 # ---------------- 설 정 ----------------
 # [주의] 샴 네트워크를 여러 프로세스에서 띄우면 VRAM을 많이 씁니다.
 # VRAM이 부족하면 num_envs를 1 또는 2로 줄이세요.
