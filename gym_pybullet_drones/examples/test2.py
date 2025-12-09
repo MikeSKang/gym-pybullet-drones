@@ -1,160 +1,233 @@
-import torch
+import os
 import time
-import pybullet as p
 import numpy as np
+import pybullet as p
 
-# PPO 모델과 커스텀 환경을 불러옵니다.
 from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
+
 from moving_car_test import make_custom_env
 from gym_pybullet_drones.utils.utils import sync
-# (VecNormalize import 제거)
 
-# 1. 불러올 모델 파일의 경로
-MODEL_PATH = "./models_multi/best_model.zip"    #학습 도중 가장 성능이 좋았던 모델 파일 경로
-# (VEC_NORMALIZE_PATH 제거)
+# =============================================================================
+# 1. 경로 및 하이퍼파라미터 설정
+# =============================================================================
+MODEL_DIR = "./2400best"  # 모델이 저장된 폴더 경로
+MODEL_PATH = os.path.join(MODEL_DIR, "best_model.zip")
+VECNORM_CANDIDATES = [
+    os.path.join(MODEL_DIR, "vecnormalize.pkl"),
+    os.path.join(MODEL_DIR, "latest_vecnormalize.pkl"),
+    os.path.join(MODEL_DIR, "final_vecnormalize.pkl"),
+]
 
-# 2. 학습할 때 사용했던 observation mode와 동일하게 설정해야 합니다.
 OBS_MODE = "rel_pos"
 
+# --- FSM(유한 상태 머신) 상수 ---
+STATE_TRACKING = 0
+STATE_SEARCHING = 1
 
+# --- FSM 파라미터 ---
+MAX_SEARCH_TIME_STEPS = 240   # 수색 최대 시간 (약 8초)
+REACQ_ANGLE_THRESHOLD = 45.0  # 재획득 시야각 (도)
+
+# =============================================================================
+# 2. 환경 생성 함수
+# =============================================================================
+def make_env_for_test():
+    # GUI 켜기, 테스트 모드 활성화
+    return make_custom_env(gui=True, obs_mode=OBS_MODE, is_test_mode=True)
+
+# =============================================================================
+# 3. 메인 실행 블록
+# =============================================================================
 if __name__ == "__main__":
-    # --- 환경 생성 ---
-    # (VecEnv 래퍼 제거)
-    env = make_custom_env(gui=True, obs_mode=OBS_MODE, is_test_mode=True)
-    
-    # (VecNormalize.load() 관련 코드 4줄 제거)
+    # 1) DummyVecEnv로 환경 래핑
+    vec_env = DummyVecEnv([make_env_for_test])
 
-    # (롤백) unwrapped를 통해 원본 환경 속성에 직접 접근
-    TIMESTEP = env.unwrapped.CTRL_TIMESTEP  # 시뮬레이션 타임스텝 (초)
+    # 2) VecNormalize 통계 로드 (학습된 정규화 수치 적용)
+    vecnorm_loaded = False
+    for path in VECNORM_CANDIDATES:
+        if os.path.exists(path):
+            print(f"[INFO] Loading VecNormalize stats from: {path}")
+            vec_env = VecNormalize.load(path, vec_env)
+            vecnorm_loaded = True
+            break
+
+    if not vecnorm_loaded:
+        print("[WARN] VecNormalize .pkl not found! Running without normalization.")
+
+    # 테스트 모드이므로 통계 업데이트 중지
+    if isinstance(vec_env, VecNormalize):
+        vec_env.training = False
+        vec_env.norm_reward = False
+
+    # 3) PPO 모델 로드
+    model = PPO.load(MODEL_PATH, env=vec_env, device="auto")
+    print(f"[INFO] Loaded model from {MODEL_PATH}")
+
+    # 4) PyBullet 내부 객체 접근 (Ground Truth 계산용)
+    # Wrapper를 뚫고 들어가 실제 ID들을 가져옵니다.
+    wrapper = vec_env.venv.envs[0]
     
-    # 디버그용 카메라의 위치와 각도를 설정합니다.
+    # Gymnasium Wrapper 속성 접근 방식으로 ID 가져오기
+    try:
+        drone_id = wrapper.get_wrapper_attr('DRONE_IDS')[0]
+        client_id = wrapper.get_wrapper_attr('CLIENT')
+        # moving_car_test.py의 MovingTargetWrapper에 저장된 _target_id 접근
+        target_id = wrapper.get_wrapper_attr('_target_id') 
+    except AttributeError:
+        # 구버전 호환성 (직접 접근)
+        drone_id = wrapper.env.unwrapped.DRONE_IDS[0]
+        client_id = wrapper.env.unwrapped.CLIENT
+        target_id = getattr(wrapper.env.unwrapped, '_target_id', None)
+
+    TIMESTEP = wrapper.get_wrapper_attr('CTRL_TIMESTEP')
+    print(f"[INFO] Simulation Timestep: {TIMESTEP:.4f} sec")
+
+    # 디버깅 카메라 초기화
     p.resetDebugVisualizerCamera(
-        cameraDistance=5,      # 카메라와 타겟 사이의 거리 (값을 키울수록 멀어짐)
-        cameraYaw=45,           # 카메라의 수평 회전 각도 (정면 = 0)
-        cameraPitch=-30,        # 카메라의 수직 기울기 (위에서 아래로 보는 각도)
-        cameraTargetPosition=[0, 0, 0] # 카메라가 바라보는 지점 (월드 좌표)
+        cameraDistance=5,
+        cameraYaw=45,
+        cameraPitch=-30,
+        cameraTargetPosition=[0, 0, 0],
+        physicsClientId=client_id
     )
-    # --- 모델 불러오기 ---
-    # device='auto'로 설정하면 사용 가능한 GPU를 자동으로 찾습니다.
-    model = PPO.load(MODEL_PATH, env=env, device='auto')
-    print(f"'{MODEL_PATH}' 모델을 성공적으로 불러왔습니다.")
 
-    # --- 테스트 루프 실행 ---
-    # (롤백) .reset()은 2개의 값을 반환합니다.
-    obs, info = env.reset()
-    print("테스트를 시작합니다...")
-    
-    # 10 에피소드 동안 테스트
-    for episode in range(10):
-        # --- FSM(상태 기계) 변수 초기화 ---
-        STATE_TRACKING = 0
-        STATE_SEARCHING = 1
+    print(">>> 테스트 시작 <<<")
+
+    for ep in range(10):  # 10회 테스트
+        done = False
+        total_reward = 0.0
+        steps = 0
+        start_time = time.time()
+
+        # FSM 초기화
         current_state = STATE_TRACKING
         search_timer = 0
         
-        # --- FSM 하이퍼파라미터 ---
-        max_search_time = 240 # 최대 탐색 시간 (10초 @ 24Hz)
-        REACQ_ANGLE_THRESHOLD = 45.0 # 재획득 카메라 시야각 (도)
+        # 마지막으로 확인된 타겟의 '진짜' 상대 위치 (초기값: 전방 1m)
+        last_known_true_rel_pos = np.array([1.0, 0.0, 0.0])
 
-        # --- 에피소드 변수 초기화 ---
-        terminated = False
-        truncated = False
-        total_reward = 0
-        steps = 0
-        
-        start = time.time()
-        # (롤백) .reset()은 2개의 값을 반환합니다.
-        obs, info = env.reset()
+        obs = vec_env.reset()
 
-        # (롤백) unwrapped를 통해 원본 환경 속성에 직접 접근
-        drone_id = env.unwrapped.DRONE_IDS[0]
-        client_id = env.unwrapped.CLIENT # (카메라 추적용 ID 미리 저장)
+        # 에피소드마다 타겟 ID가 바뀔 수 있으므로 갱신 시도
+        try:
+            target_id = wrapper.get_wrapper_attr('_target_id')
+        except:
+            pass
 
-        while not (terminated or truncated):
+        while not done:
+            # -----------------------------------------------------------
+            # [Step 0] Ground Truth(진짜 좌표) 계산
+            # 정규화된 obs 대신, 물리 엔진에서 직접 좌표를 가져와 판단합니다.
+            # -----------------------------------------------------------
+            d_pos, d_orn = p.getBasePositionAndOrientation(drone_id, physicsClientId=client_id)
+            t_pos, t_orn = p.getBasePositionAndOrientation(target_id, physicsClientId=client_id)
             
-            # 1. FSM 상태에 따라 행동(action) 결정
+            # 실제 상대 위치 벡터 (Target - Drone)
+            true_rel_pos = np.array(t_pos) - np.array(d_pos)
+            true_dist_3d = np.linalg.norm(true_rel_pos)
+
+            # Tracking 중이라면 마지막 위치 기억 (수색용)
             if current_state == STATE_TRACKING:
-                # (DRL 모드) PPO 모델의 결정 사용
-                action, _states = model.predict(obs, deterministic=True)
+                last_known_true_rel_pos = true_rel_pos
+
+            # -----------------------------------------------------------
+            # [Step 1] FSM 행동 결정 (Action Selection)
+            # -----------------------------------------------------------
+            if current_state == STATE_TRACKING:
+                # 모델 예측 (obs는 정규화되어 있음 -> 모델에 적합)
+                action, _ = model.predict(obs, deterministic=True)
             
             elif current_state == STATE_SEARCHING:
-                # (탐색 모드) "타겟 방향으로 상승 비행" 액션 생성
                 search_timer += 1
                 
-                normalized_direction = np.array([0.0, 0.0, 1.0]) # (Failsafe: 수직 상승)
-                    
-                throttle = 0.1 #  속도로 탐색 비행
+                # 기억해둔 마지막 위치 방향 계산
+                target_dx = last_known_true_rel_pos[0]
+                target_dy = last_known_true_rel_pos[1]
                 
-                action = np.array([
-                    0.0, # target_vx (방향)
-                    0.0, # target_vy (방향)
-                    1.0, # target_vz (방향)
-                    throttle               # 속도 크기
-                ])
+                mag_xy = np.hypot(target_dx, target_dy)
+                
+                # 방향 벡터 정규화
+                if mag_xy > 0.1: # 거리가 너무 가까우면 방향 의미 없음
+                    dir_x = target_dx / mag_xy
+                    dir_y = target_dy / mag_xy
+                else:
+                    dir_x, dir_y = 1.0, 0.0 # 정보 없으면 전방 수색
+                
+                # [수색 액션]
+                # - XY: 방향 * 0.5 (적당한 속도로 이동)
+                # - Z: 0.0 (고도 유지 -> 1.0에서 0.0으로 수정됨)
+                # - Yaw Rate: 0.1 (천천히 회전하며 주변 살피기)
+                # - Shape: (1, 1, 4)로 만들어 차원 에러 방지
+                action = np.array([[[dir_x * 0.5, dir_y * 0.5, 0.0, 0.1]]], dtype=np.float32)
 
-            # 2. 결정된 행동으로 환경 실행
-            # (롤백) .step()은 5개의 값을 반환합니다.
-            action = np.array(action, dtype=np.float32)
-            if action.ndim == 1:
-                action = action.reshape(1, -1)
-            obs, reward, terminated, truncated, info = env.step(action)
-            
-            # (롤백) reward는 스칼라 값입니다.
-            total_reward += reward
+            # -----------------------------------------------------------
+            # [Step 2] 환경 실행
+            # -----------------------------------------------------------
+            obs, reward, done, info = vec_env.step(action)
+
+            # 데이터 언패킹
+            reward_val = reward[0] if hasattr(reward, "__len__") else reward
+            done_flag = done[0] if hasattr(done, "__len__") else done
+            single_info = info[0] if isinstance(info, list) else info
+
+            total_reward += reward_val
             steps += 1
 
-            # 3. FSM 상태 전이 로직
-            # (롤백) info는 딕셔너리입니다.
-            status = info.get('status', None) # moving_car_test.py가 보낸 신호
+            # -----------------------------------------------------------
+            # [Step 3] FSM 상태 전이 (State Transition)
+            # -----------------------------------------------------------
+            # 환경에서 보내주는 상태 메시지 확인 (e.g. 시야각 벗어남)
+            env_status = single_info.get('status', None)
 
             if current_state == STATE_TRACKING:
-                if status == 'TARGET_LOST':
-                    #1. 추적 -> 탐색 모드로 바뀔 때 출력
-                    print(f"[FSM] Target lost (Step {steps}). Switching to SEARCH mode.")
+                if env_status == 'TARGET_LOST':
+                    print(f"[FSM] 놓침! (Step {steps}). 마지막 위치: {last_known_true_rel_pos[:2].round(2)}. 수색 모드 전환.")
                     current_state = STATE_SEARCHING
                     search_timer = 0
-                    
-            elif current_state == STATE_SEARCHING:
-                
-                # --- 각도 기반 재획득 조건 검사 ---
-                drone_down_vector = np.array([0.0, 0.0, -1.0])
-                # (롤백) obs는 배열입니다.
-                drone_to_target_vector = obs[0:3] # rel_pos
-                dist_3d = np.linalg.norm(drone_to_target_vector)
-                
-                reacq_angle_deg = 90.0 # (기본값)
-                
-                if dist_3d > 1e-6:
-                    dot_product = -drone_to_target_vector[2] # (0,0,-1) . (x,y,z) = -z
-                    cos_theta = np.clip(dot_product / dist_3d, -1.0, 1.0)
-                    reacq_angle_deg = np.degrees(np.arccos(cos_theta))
-
-                if reacq_angle_deg < REACQ_ANGLE_THRESHOLD:
-                    #2. 탐색 -> 추적 모드로 바뀔 때 출력
-                    print(f"[FSM] Target Re-acquired! (Angle: {reacq_angle_deg:.2f}°). Switching to TRACKING mode.")
-                    current_state = STATE_TRACKING
-                    
-                elif search_timer > max_search_time:
-                    #3. 탐색 실패(타임아웃) 시 출력
-                    print(f"[FSM] Search Failed (timeout). Terminating episode.")
-                    terminated = True # 에피소드 강제 종료
             
-            # --- 카메라 추적 로직 ---
-            # (롤백) 미리 저장한 client_id 사용
-            drone_pos, _ = p.getBasePositionAndOrientation(drone_id, physicsClientId=client_id)
+            elif current_state == STATE_SEARCHING:
+                # [핵심] Ground Truth 기반 재획득 판정
+                # 정규화된 obs 대신 위에서 계산한 true_rel_pos 사용
+                
+                reacq_angle_deg = 90.0
+                if true_dist_3d > 1e-6:
+                    # 드론 기준 하방 벡터(0,0,-1)와 타겟 벡터 간 각도
+                    # Dot( (0,0,-1), (x,y,z) ) = -z
+                    dot_val = -true_rel_pos[2]
+                    cos_theta = np.clip(dot_val / true_dist_3d, -1.0, 1.0)
+                    reacq_angle_deg = np.degrees(np.arccos(cos_theta))
+                
+                # 판정
+                if reacq_angle_deg < REACQ_ANGLE_THRESHOLD:
+                    print(f"[FSM] 타겟 재발견! (각도: {reacq_angle_deg:.1f}°). Tracking 복귀.")
+                    current_state = STATE_TRACKING
+                
+                elif search_timer > MAX_SEARCH_TIME_STEPS:
+                    print(f"[FSM] 수색 시간 초과. 에피소드 종료.")
+                    done_flag = True
+
+            # -----------------------------------------------------------
+            # [Step 4] 시각화 (Camera Follow)
+            # -----------------------------------------------------------
+            # 드론 위치 다시 가져오기 (step 이후)
+            cur_drone_pos, _ = p.getBasePositionAndOrientation(drone_id, physicsClientId=client_id)
             
             p.resetDebugVisualizerCamera(
-                cameraDistance=3,      
-                cameraYaw=0,           
-                cameraPitch=-70,        
-                cameraTargetPosition=drone_pos 
+                cameraDistance=3,
+                cameraYaw=0,
+                cameraPitch=-70,
+                cameraTargetPosition=cur_drone_pos,
+                physicsClientId=client_id
             )
 
-            sync(steps, start, TIMESTEP)
+            sync(steps, start_time, TIMESTEP)
 
-        print(f"에피소드 {episode + 1}: 총 보상 = {total_reward:.2f}, 스텝 수 = {steps}")
-        # (롤백) .reset()은 2개의 값을 반환합니다.
-        obs, info = env.reset()
+            if done_flag:
+                break
 
-    env.close()
-    print("테스트가 종료되었습니다.")
+        print(f"[Episode {ep+1}] Total Reward: {total_reward:.2f}, Steps: {steps}")
+
+    vec_env.close()
+    print("테스트 종료.")

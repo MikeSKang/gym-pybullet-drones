@@ -42,17 +42,17 @@ class VisualizingSiameseWrapper(SiameseTrainingWrapper):
             "rel_vel": np.zeros(3)
         }
         
-        # [수정 1] 필터 파라미터 튜닝
-        # alpha가 작을수록 반응은 느려지지만 부드러워집니다. (기존 값보다 낮게 설정 추천: 0.1 ~ 0.3)
+        # 필터 파라미터 튜닝
+        # alpha가 작을수록 반응은 느려지지만 부드움
         self.alpha = 0.3
         
-        # [수정 2] 좌표 스무딩용 변수 추가
+        #좌표 스무딩용 변수 추가
         self.prev_sx = None
         self.prev_sy = None
 
     def _get_vision_obs(self):
         # ---------------------------------------------------------------------------
-        # 1. 이미지 촬영 및 전처리 (기존 유지)
+        # 1. 이미지 촬영 및 전처리
         # ---------------------------------------------------------------------------
         pos, orn = p.getBasePositionAndOrientation(self.drone_id, physicsClientId=self.client)
         rpy = p.getEulerFromQuaternion(orn)
@@ -80,7 +80,7 @@ class VisualizingSiameseWrapper(SiameseTrainingWrapper):
         rgb_image = np.reshape(rgb, (255, 255, 4)).astype(np.uint8)[:, :, :3]
 
         # ---------------------------------------------------------------------------
-        # 2. 샴 네트워크 추론 (기존 유지)
+        # 2. 샴 네트워크 추론
         # ---------------------------------------------------------------------------
         search_tensor = preprocess_rgb(rgb_image, (255,255), self.device, imagenet_norm=False)
         with torch.no_grad():
@@ -95,7 +95,7 @@ class VisualizingSiameseWrapper(SiameseTrainingWrapper):
         )
 
         # ---------------------------------------------------------------------------
-        # 3. 좌표 스무딩 (기존 유지)
+        # 3. 좌표 스무딩
         # ---------------------------------------------------------------------------
         if self.prev_sx is not None:
             smooth_factor = 0.4 
@@ -112,7 +112,7 @@ class VisualizingSiameseWrapper(SiameseTrainingWrapper):
         conf = (max_v - mean_v) / std_v
 
         # ---------------------------------------------------------------------------
-        # [수정 핵심 1] 물리 거리 변환 (Z 높이 보정 추가)
+        # 물리 거리 변환 (Z 높이 보정 추가)
         # ---------------------------------------------------------------------------
         drone_pos, drone_orn = p.getBasePositionAndOrientation(self.drone_id, physicsClientId=self.client)
         current_z = drone_pos[2]
@@ -133,7 +133,7 @@ class VisualizingSiameseWrapper(SiameseTrainingWrapper):
         rel_body_y = -error_x_pixels * meters_per_pixel 
 
         # ---------------------------------------------------------------------------
-        # [수정 핵심 2] Body Frame -> World Frame 회전 변환
+        # Body Frame -> World Frame 회전 변환
         # ---------------------------------------------------------------------------
         # 드론의 현재 Yaw (위에서 구한 rpy[2] 사용)
         # World_X = Body_X * cos(yaw) - Body_Y * sin(yaw)
@@ -149,6 +149,7 @@ class VisualizingSiameseWrapper(SiameseTrainingWrapper):
         raw_vel = (current_rel_pos - self.prev_rel_pos) / self.dt
         self.filtered_rel_vel = (self.alpha * raw_vel) + ((1 - self.alpha) * self.filtered_rel_vel)
         
+        #신뢰도가 너무 낮으면(타겟이 아님) 0으로 설정(deadzone)
         if conf < 2.5: # 2.5 or 3.0
             final_vel = np.zeros(3, dtype=np.float32)
         else:
@@ -179,7 +180,7 @@ def draw_velocity_arrow(img, rel_vel, scale=50):
     """
     img: 카메라 이미지 프레임 (numpy array)
     rel_vel: 상대 속도 벡터 (예: [vx, vy, vz])
-    scale: 속도 값을 픽셀 길이로 변환할 배율 (속도가 작으면 값을 키우세요)
+    scale: 속도 값을 픽셀 길이로 변환할 배율
     """
     h, w = img.shape[:2]
     center_x, center_y = w // 2, h // 2
@@ -216,14 +217,14 @@ def draw_4way_hud(img, rel_vel_world, drone_yaw, conf_score):
     center_x, center_y = w // 2, h // 2
     
     # ---------------------------------------------------------
-    # 1. 좌표 변환 (기존 동일)
+    # 1. 좌표 변환
     # ---------------------------------------------------------
     vx_world, vy_world = rel_vel_world[0], rel_vel_world[1]
     vel_forward = vx_world * np.cos(drone_yaw) + vy_world * np.sin(drone_yaw)
     vel_right = -vx_world * np.sin(drone_yaw) + vy_world * np.cos(drone_yaw)
 
     # ---------------------------------------------------------
-    # 2. 4방향 바 그리기 (기존 동일)
+    # 2. 4방향 바 그리기
     # ---------------------------------------------------------
     scale = 30.0; max_len = 100; bar_width = 10; gap = 20
     
@@ -247,7 +248,7 @@ def draw_4way_hud(img, rel_vel_world, drone_yaw, conf_score):
         cv2.rectangle(img, (center_x - gap - length, center_y - bar_width//2), (center_x - gap, center_y + bar_width//2), (0, 255, 0), -1)
 
     # ---------------------------------------------------------
-    # 3. [추가됨] Conf 점수 및 상태 표시
+    # 3. Conf 점수 및 상태 표시
     # ---------------------------------------------------------
     # Conf 점수에 따른 색상 변화
     if conf_score > 3.0:

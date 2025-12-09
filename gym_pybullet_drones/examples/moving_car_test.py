@@ -147,8 +147,8 @@ class MovingTargetWrapper(gym.Wrapper):
         self.x_max, self.y_max = x_max, y_max
         self.target_pos = np.array([0.0, 0.0, self.init_target_z])
         
-        self.min_speed = 0.1
-        self.max_speed = 0.8
+        self.min_speed = 0.05
+        self.max_speed = 0.3
         self.max_accel = 0.05
         self.max_turn_rate = 0.05
         
@@ -437,7 +437,7 @@ class MovingTargetWrapper(gym.Wrapper):
             self.lost_steps += 1
             if self.is_test_mode:
                 # [테스트 모드]: 신호를 보내고 종료하지 않음
-                terminated = True
+                terminated = False
                 info['status'] = 'TARGET_LOST'
                 reward -= 10.0 # (타겟을 놓친 것에 대한 가벼운 페널티)
                 term_reason = "angle_lost_test"
@@ -482,6 +482,11 @@ class MovingTargetWrapper(gym.Wrapper):
             obs = {"rgb": self._render_rgb(), "rel_pos": full_obs_vector}
         else:
             obs = full_obs_vector
+
+        # [추가] FSM 로직을 위해 '진짜 각도(Ground Truth)'를 info에 담아 보냅니다.
+        # 위에서 이미 계산된 reacq_angle_deg 변수를 활용합니다.
+        # (만약 dist_3d < 1e-6이라 계산 안 됐으면 0.0으로 처리)
+        info["target_angle"] = float(reacq_angle_deg)
             
         return obs, float(reward), bool(terminated), bool(truncated), info
 
