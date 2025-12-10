@@ -377,12 +377,12 @@ if __name__ == "__main__":
             MODEL_PATH,
             env=train_env,
             device=DEVICE, # 기존 코드에 cpu로 되어있던데, 가급적 cuda(DEVICE) 추천
-            batch_size=2048,
-            n_steps=2048,
+            batch_size=1024,
+            n_steps=256,
             n_epochs=10,
             custom_objects={
-                "learning_rate": 3e-4,
-                "ent_coef": 0.01,
+                "learning_rate": 1e-4,
+                "ent_coef": 0.02,
                 "clip_range": 0.2,
                 "tensorboard_log": os.path.join(OUTPUT_FOLDER, "tb_logs")
             }

@@ -21,8 +21,8 @@ from check import preprocess_rgb, map_heatmap_to_search_linear
 current_dir = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_FOLDER = os.path.join(current_dir, "results_learn3") 
 
-MODEL_PATH = os.path.join(OUTPUT_FOLDER, "best_model.zip")
-STATS_PATH = os.path.join(OUTPUT_FOLDER, "final_vecnormalize.pkl")
+MODEL_PATH = os.path.join(OUTPUT_FOLDER, "ppo_siamese_949848_steps.zip")
+STATS_PATH = os.path.join(OUTPUT_FOLDER, "ppo_siamese_vecnormalize_949848_steps.pkl")
 SIAMESE_MODEL_PATH = os.path.join(current_dir, "BaselinePretrained.pth.tar")
 TEMPLATE_PATH = os.path.join(current_dir, "tracking_object.png")
 
