@@ -382,7 +382,7 @@ if __name__ == "__main__":
             n_epochs=10,
             custom_objects={
                 "learning_rate": 1e-4,
-                "ent_coef": 0.02,
+                "ent_coef": 0.01,
                 "clip_range": 0.2,
                 "tensorboard_log": os.path.join(OUTPUT_FOLDER, "tb_logs")
             }
