@@ -1,3 +1,8 @@
+'''
+Test2: 절대좌표에서 ppo만으로 학습된 모델로 이동하는 타겟 추적 테스트
+FSM 기반 타겟 추적 테스트
+'''
+import cv2
 import os
 import time
 import numpy as np
@@ -8,6 +13,81 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from moving_car_test import make_custom_env
 from gym_pybullet_drones.utils.utils import sync
+
+def draw_4way_hud(img, rel_vel_world, drone_yaw, conf_score=None):
+    """
+    img: 카메라 이미지
+    rel_vel_world: 타겟의 상대 속도(월드 좌표)
+    drone_yaw: 드론의 현재 헤딩 각도
+    conf_score: 샴 네트워크의 확신도 점수 (float)
+    """
+    h, w = img.shape[:2]
+    center_x, center_y = w // 2, h // 2
+    
+    # ---------------------------------------------------------
+    # 1. 좌표 변환
+    # ---------------------------------------------------------
+    vx_world, vy_world = rel_vel_world[0], rel_vel_world[1]
+    vel_forward = vx_world * np.cos(drone_yaw) + vy_world * np.sin(drone_yaw)
+    vel_right = -vx_world * np.sin(drone_yaw) + vy_world * np.cos(drone_yaw)
+
+    # ---------------------------------------------------------
+    # 2. 4방향 바 그리기
+    # ---------------------------------------------------------
+    scale = 30.0; max_len = 100; bar_width = 10; gap = 20
+    
+    # 십자선
+    cv2.line(img, (center_x, center_y - max_len - gap), (center_x, center_y + max_len + gap), (100, 100, 100), 1)
+    cv2.line(img, (center_x - max_len - gap, center_y), (center_x + max_len + gap, center_y), (100, 100, 100), 1)
+    
+    # 상하좌우 바
+    if vel_forward > 0: # 전진 (Red)
+        length = int(min(abs(vel_forward) * scale, max_len))
+        cv2.rectangle(img, (center_x - bar_width//2, center_y - gap - length), (center_x + bar_width//2, center_y - gap), (0, 0, 255), -1)
+    elif vel_forward < 0: # 후진 (Yellow)
+        length = int(min(abs(vel_forward) * scale, max_len))
+        cv2.rectangle(img, (center_x - bar_width//2, center_y + gap), (center_x + bar_width//2, center_y + gap + length), (0, 255, 255), -1)
+
+    if vel_right > 0: # 우측 (Green)
+        length = int(min(abs(vel_right) * scale, max_len))
+        cv2.rectangle(img, (center_x + gap, center_y - bar_width//2), (center_x + gap + length, center_y + bar_width//2), (0, 255, 0), -1)
+    elif vel_right < 0: # 좌측 (Green)
+        length = int(min(abs(vel_right) * scale, max_len))
+        cv2.rectangle(img, (center_x - gap - length, center_y - bar_width//2), (center_x - gap, center_y + bar_width//2), (0, 255, 0), -1)
+
+    # ---------------------------------------------------------
+    # 3. Conf 점수 및 상태 표시
+    # ---------------------------------------------------------
+    if conf_score is None:
+        # Ground Truth 기반 테스트에서는 점수가 없으므로 회색으로 표시하거나 표시하지 않습니다.
+        conf_text = "CONF: N/A (GT)"
+        conf_color = (100, 100, 100) # 회색
+    elif conf_score > 3.0:
+        conf_text = f"CONF: {conf_score:.2f}"
+        conf_color = (0, 255, 0) # Green (안전)
+    elif conf_score > 2.0:
+        conf_text = f"CONF: {conf_score:.2f}"
+        conf_color = (0, 255, 255) # Yellow (주의)
+    else:
+        conf_text = f"CONF: {conf_score:.2f}"
+        conf_color = (0, 0, 255) # Red (위험)
+
+    # 좌측 상단에 Conf 표시
+    # [수정] 위에서 결정된 텍스트와 색상을 사용합니다.
+    cv2.putText(img, conf_text, (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, conf_color, 2)
+
+    # 중앙 하단 상태 메시지
+    font_scale = 0.5
+    if abs(vel_forward) < 0.2 and abs(vel_right) < 0.2:
+        msg = "LOCK-ON"
+        msg_color = (0, 255, 0)
+    else:
+        msg = "TRACKING"
+        msg_color = (0, 255, 255)
+        
+    cv2.putText(img, msg, (center_x - 30, center_y - 5), cv2.FONT_HERSHEY_SIMPLEX, font_scale, msg_color, 2)
+    
+    return img
 
 # =============================================================================
 # 1. 경로 및 하이퍼파라미터 설정
@@ -123,7 +203,7 @@ if __name__ == "__main__":
             # -----------------------------------------------------------
             d_pos, d_orn = p.getBasePositionAndOrientation(drone_id, physicsClientId=client_id)
             t_pos, t_orn = p.getBasePositionAndOrientation(target_id, physicsClientId=client_id)
-            
+            print(d_pos)
             # 실제 상대 위치 벡터 (Target - Drone)
             true_rel_pos = np.array(t_pos) - np.array(d_pos)
             true_dist_3d = np.linalg.norm(true_rel_pos)
@@ -207,6 +287,49 @@ if __name__ == "__main__":
                 elif search_timer > MAX_SEARCH_TIME_STEPS:
                     print(f"[FSM] 수색 시간 초과. 에피소드 종료.")
                     done_flag = True
+
+            # 1. 환경에서 RGB 이미지 가져오기
+            # (DummyVecEnv로 감싸져 있어서 unwrapped 접근 필요)
+            try:
+                # obs_mode가 'rgb' 또는 'both'여야 함
+                rgb_image = wrapper.get_wrapper_attr('_render_rgb')() 
+            except AttributeError:
+                # 만약 _render_rgb 접근이 안 된다면, 직접 PyBullet API 호출 필요
+                # (moving_car_test.py의 _render_rgb 함수 참조)
+                print("[WARN] Cannot get RGB image. Skip HUD visualization.")
+                rgb_image = None
+
+            if rgb_image is not None:
+                # 2. 드론 물리 정보 가져오기 (HUD용)
+                d_vel, _ = p.getBaseVelocity(drone_id, physicsClientId=client_id)
+                _, d_orn = p.getBasePositionAndOrientation(drone_id, physicsClientId=client_id)
+                d_yaw = p.getEulerFromQuaternion(d_orn)[2]
+
+                # 3. 타겟 상대 속도 계산 (World Frame)
+                # (true_rel_pos는 이미 [Step 0]에서 계산됨)
+                # 실제 속도 차이 계산 (Target V - Drone V)
+                # 타겟 속도는 moving_car_test의 내부 변수(speed, angle)를 알아야 정확함.
+                # 여기서는 근사적으로 이전 위치와의 차이로 계산하거나,
+                # wrapper에서 정보를 가져와야 함.
+                # (간단히 드론 속도의 반대 방향을 표시하는 것으로 대체 가능)
+                rel_vel_world = -np.array(d_vel) # 임시: 드론 속도의 반대
+
+                # 4. HUD 그리기
+                frame = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+                frame = cv2.resize(frame, (512, 512), interpolation=cv2.INTER_NEAREST)
+                
+                # conf_score는 Ground Truth 기반이라 없음 (None 처리)
+                frame = draw_4way_hud(frame, rel_vel_world, d_yaw, conf_score=None)
+                
+                # 상태(FSM) 표시
+                status_text = "TRACKING" if current_state == STATE_TRACKING else "SEARCHING"
+                cv2.putText(frame, status_text, (256-50, 256+30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+                # 5. 화면 출력
+                cv2.imshow("Drone HUD View", frame)
+                if cv2.waitKey(1) == ord('q'):
+                    done = True # q 누르면 종료
 
             # -----------------------------------------------------------
             # [Step 4] 시각화 (Camera Follow)

@@ -158,8 +158,8 @@ class MovingTargetWrapper(gym.Wrapper):
         self.x_max, self.y_max = x_max, y_max
         self.target_pos = np.array([0.0, 0.0, self.init_target_z])
         
-        self.min_speed = 0.1
-        self.max_speed = 0.5
+        self.min_speed = 0.05
+        self.max_speed = 0.3
         self.max_accel = 0.05
         self.max_turn_rate = 0.05
         
@@ -373,7 +373,33 @@ class MovingTargetWrapper(gym.Wrapper):
 
     def step(self, action):
         # 1. 하위 환경 실행 및 타겟 업데이트
-        obs_base, _, term_base, trunc_base, info = self.env.step(action)
+        # 원본 action을 수정하지 않도록 복사
+        modified_action = action.copy()
+        modified_action[..., 2] = 0.0   #z축 고정
+        obs_base, _, term_base, trunc_base, info = self.env.step(modified_action)
+
+        # ---------------------------------------------------------------------
+        # [신규] 고도 침하 방지: 물리 엔진 강제 리셋 (God Mode)
+        # 드론이 움직이면서 조금씩 가라앉는 것을 막기 위해, 
+        # 매 스텝마다 강제로 높이(Z)를 2.0m로 돌려놓습니다.
+        # ---------------------------------------------------------------------
+        
+        # 현재 위치와 자세 가져오기
+        pos, orn = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
+        lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
+        
+        # 높이만 2.0으로 강제 보정 (나머지 X, Y는 물리 엔진 계산 결과 유지)
+        # 만약 초기 고도가 2.0이 아니었다면 self.init_target_z + alpha 등으로 조절
+        forced_pos = [pos[0], pos[1], 2.0] 
+        
+        # 수직 속도도 0으로 죽여버림 (관성 제거)
+        forced_lin_vel = [lin_vel[0], lin_vel[1], 0.0]
+
+        # 물리 엔진에 적용
+        p.resetBasePositionAndOrientation(self._drone_id, forced_pos, orn, physicsClientId=self._client)
+        p.resetBaseVelocity(self._drone_id, forced_lin_vel, ang_vel, physicsClientId=self._client)
+        # ---------------------------------------------------------------------
+
         self._update_target()
         
         

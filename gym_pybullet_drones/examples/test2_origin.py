@@ -1,3 +1,7 @@
+'''
+Test2: 절대좌표에서 ppo만으로 학습된 모델로 이동하는 타겟 추적 테스트
+'''
+
 import os
 import time
 import pybullet as p
