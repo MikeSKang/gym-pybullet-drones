@@ -17,11 +17,9 @@ from moving_car_test import make_custom_env, MovingTargetWrapper
 from model import SiameseNet, BaselineEmbeddingNet
 from check import preprocess_rgb, letterbox_rgb, map_heatmap_to_search_linear, TEMPLATE_SIZE
 
-#terminal: tensorboard --logdir .\gym_pybullet_drones\examples\results_learn3\tb_logs
-
 # ---------------- 설 정 ----------------
 # [주의] 샴 네트워크를 여러 프로세스에서 띄우면 VRAM을 많이 씁니다.
-# VRAM이 부족하면 num_envs를 1 또는 2로 줄이세요.
+# VRAM이 부족하면 num_envs를 1 또는 2로 줄이기
 NUM_ENVS = 12
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 TOTAL_TIMESTEPS = 5_000_000
@@ -71,13 +69,13 @@ class SiameseTrainingWrapper(gym.Wrapper):
         self.drone_id = self.env.unwrapped.DRONE_IDS[0]
         self.client = self.env.unwrapped.CLIENT
 
-        # [추가] 필터링을 위한 이전 속도 저장 변수
+        # 필터링을 위한 이전 속도 저장 변수
         self.filtered_rel_vel = np.zeros(3, dtype=np.float32)
         
         # 필터 강도 (0.0 ~ 1.0): 클수록 부드럽지만 반응이 느림
         # 0.1 ~ 0.2 정도 추천
         self.alpha = 0.3
-        # [수정 2] 좌표 스무딩용 변수 초기화
+        # 좌표 스무딩용 변수 초기화
         self.prev_sx = None
         self.prev_sy = None
 
@@ -85,7 +83,7 @@ class SiameseTrainingWrapper(gym.Wrapper):
         # 환경 리셋 (moving_car_test의 reset은 obs를 반환하므로 받아둠)
         _, info = self.env.reset(**kwargs)
 
-        # [수정 3] 리셋 시 스무딩 변수도 초기화
+        # 리셋 시 스무딩 변수도 초기화
         self.prev_rel_pos = np.zeros(3, dtype=np.float32)
         self.filtered_rel_vel = np.zeros(3, dtype=np.float32)
         self.prev_sx = None
@@ -152,7 +150,7 @@ class SiameseTrainingWrapper(gym.Wrapper):
 
         view_matrix = p.computeViewMatrix(eye_pos.tolist(), target_pos.tolist(), up_vec.tolist())
 
-        # [중요] aspect ratio를 1.0 (255/255)으로 설정
+        # aspect ratio를 1.0 (255/255)으로 설정
         proj_matrix = p.computeProjectionMatrixFOV(
             fov=90.0, 
             aspect=1.0, 
@@ -193,7 +191,7 @@ class SiameseTrainingWrapper(gym.Wrapper):
             4.255573, 58.647, 3.910728, 63.602,
             half_pixel=True
         )
-        # [수정 4] 좌표 스무딩 적용 (test3.py와 동일 로직)
+        # 좌표 스무딩 적용 (test3.py와 동일 로직)
         if self.prev_sx is not None:
             smooth_factor = 0.4 # 값이 클수록 이전 값 비중이 높음 (부드러움)
             sx = smooth_factor * self.prev_sx + (1 - smooth_factor) * sx
@@ -243,7 +241,7 @@ class SiameseTrainingWrapper(gym.Wrapper):
         rel_body_y = -error_x_pixels * meters_per_pixel
 
         # ---------------------------------------------------------------------------
-        # [수정 핵심 1] Body Frame -> World Frame 좌표 변환
+        # Body Frame -> World Frame 좌표 변환
         # ---------------------------------------------------------------------------
         # 드론의 현재 Yaw 각도 구하기
         rpy = p.getEulerFromQuaternion(drone_orn)
@@ -259,7 +257,7 @@ class SiameseTrainingWrapper(gym.Wrapper):
         current_rel_pos = np.array([rel_x_world, rel_y_world, 0.0 - current_z], dtype=np.float32)
 
         # ---------------------------------------------------------------------------
-        # 5. 속도 계산 및 반환 (이전과 동일)
+        # 5. 속도 계산 및 반환
         # ---------------------------------------------------------------------------
         raw_vel = (current_rel_pos - self.prev_rel_pos) / self.dt
         self.filtered_rel_vel = (self.alpha * raw_vel) + ((1 - self.alpha) * self.filtered_rel_vel) #상대속도에 Low-Pass Filter 적용
@@ -324,7 +322,7 @@ if __name__ == "__main__":
     TEMPLATE_PATH = os.path.join(current_dir, "tracking_object.png")
     OUTPUT_FOLDER = os.path.join(current_dir, "results_learn3")
 
-    # [추가] learn2의 결과물 경로 (폴더명이 다르면 수정하세요!)
+    # learn2의 결과물 경로
     LEARN2_FOLDER = os.path.join(current_dir, "results_learn2") # learn2 결과 폴더
     STATS_PATH = os.path.join(LEARN2_FOLDER, "final_vecnormalize.pkl")
     MODEL_PATH = os.path.join(LEARN2_FOLDER, "final_model.zip")
@@ -332,7 +330,7 @@ if __name__ == "__main__":
     if not os.path.exists(OUTPUT_FOLDER):
         os.makedirs(OUTPUT_FOLDER)
 
-    # 2. 환경 생성 함수 정의 (기존 동일)
+    # 2. 환경 생성 함수 정의
     def make_env(rank: int, seed: int = 0):
         def _init():
             env = make_custom_env(gui=False, obs_mode="rgb", is_test_mode=False)
@@ -344,11 +342,11 @@ if __name__ == "__main__":
 
     print(f"[INFO] {NUM_ENVS}개의 환경에서 학습을 시작합니다. (Device: {DEVICE})")
     
-    # 3. Train Env 생성 및 통계 로드 (수정됨)
+    # 3. Train Env 생성 및 통계 로드
     train_env = SubprocVecEnv([make_env(i) for i in range(NUM_ENVS)])
     train_env = VecMonitor(train_env)
 
-    # [핵심 1] learn2의 통계 파일(VecNormalize)이 있으면 불러오기
+    # learn2의 통계 파일(VecNormalize)이 있으면 불러오기
     if os.path.exists(STATS_PATH):
         print(f"[INFO] learn2의 정규화 통계(VecNormalize)를 로드합니다: {STATS_PATH}")
         # 파일에서 통계(평균, 분산)를 불러와서 환경에 적용
@@ -361,7 +359,7 @@ if __name__ == "__main__":
         print(f"[WARNING] 통계 파일({STATS_PATH})이 없습니다. 맨땅에서 시작합니다.")
         train_env = VecNormalize(train_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
-    # 4. Eval Env 생성 (수정됨)
+    # 4. Eval Env 생성
     eval_env = SubprocVecEnv([make_env(999)])
     eval_env = VecMonitor(eval_env)
     # Eval 환경도 로드된 train_env의 설정을 따라야 하므로 동기화
@@ -369,21 +367,21 @@ if __name__ == "__main__":
     eval_env.obs_rms = train_env.obs_rms
     eval_env.ret_rms = train_env.ret_rms
     
-    # 5. 모델 로드 또는 생성 (수정됨)
+    # 5. 모델 로드 또는 생성
     if os.path.exists(MODEL_PATH):
         print(f"[INFO] learn2의 사전 학습 모델을 로드합니다: {MODEL_PATH}")
-        # [핵심 2] 모델 불러오기 + 파인튜닝 설정
+        # 모델 불러오기 + 파인튜닝 설정
         model = PPO.load(
             MODEL_PATH,
             env=train_env,
             device=DEVICE, # 기존 코드에 cpu로 되어있던데, 가급적 cuda(DEVICE) 추천
-            batch_size=1024,
-            n_steps=1024,
-            n_epochs=10,
+            batch_size=2048,
+            n_steps=2048,
+            n_epochs=6,
             custom_objects={
-                "learning_rate": 1e-4,
+                "learning_rate": 5e-5,
                 "ent_coef": 0.01,
-                "clip_range": 0.2,
+                "clip_range": 0.1,
                 "tensorboard_log": os.path.join(OUTPUT_FOLDER, "tb_logs")
             }
         )
@@ -394,8 +392,8 @@ if __name__ == "__main__":
             train_env,
             verbose=1,
             tensorboard_log=os.path.join(OUTPUT_FOLDER, "tb_logs"),
-            learning_rate=5e-4,
-            n_steps=256,
+            learning_rate=1e-4,
+            n_steps=1024,
             batch_size=1024,
             gamma=0.99,
             gae_lambda=0.95,
@@ -403,7 +401,7 @@ if __name__ == "__main__":
             device=DEVICE # cpu보다는 cuda가 빠릅니다
         )
 
-    # 6. 콜백 및 학습 시작 (기존 동일)
+    # 6. 콜백 및 학습 시작
     eval_callback = EvalCallback(
         eval_env,
         best_model_save_path=OUTPUT_FOLDER,

@@ -1,136 +1,89 @@
-# gym-pybullet-drones
 
-This is a minimalist refactoring of the original `gym-pybullet-drones` repository, designed for compatibility with [`gymnasium`](https://github.com/Farama-Foundation/Gymnasium), [`stable-baselines3` 2.0](https://github.com/DLR-RM/stable-baselines3/pull/1327), and SITL [`betaflight`](https://github.com/betaflight/betaflight)/[`crazyflie-firmware`](https://github.com/bitcraze/crazyflie-firmware/).
+# Tracking Drone Project 🚁
 
-> **NOTE**: if you prefer to access the original codebase, presented at IROS in 2021, please `git checkout [paper|master]` after cloning the repo, and refer to the corresponding `README.md`'s.
+이 프로젝트는 [gym-pybullet-drones](https://github.com/utiasDSL/gym-pybullet-drones) 환경을 기반으로 강화학습(PPO)을 사용하여 드론이 목표물을 추적(Tracking)하도록 훈련하고 테스트하는 프로젝트입니다.
 
-<img src="gym_pybullet_drones/assets/helix.gif" alt="formation flight" width="325"> <img src="gym_pybullet_drones/assets/helix.png" alt="control info" width="425">
+## 📌 주요 기능
 
-> [!TIP]
-> If you are looking for **symbolic dynamics**, check out [`safe-control-gym`](https://github.com/utiasDSL/safe-control-gym) instead
->
-> If you are looking for **PX4/ArduPilot** support, check out [`aerial-autonomy-stack`](https://github.com/JacopoPan/aerial-autonomy-stack) instead
+프로젝트는 크게 두 가지 테스트 모드를 제공합니다:
 
-## Installation
+1.  **State-based Tracking (`test2.py`)**: 드론과 타겟의 Relative Position 정보를 직접 받아 추적합니다. FSM(Finite State Machine)을 통해 놓쳤을 때 수색(Searching) 모드로 전환하는 로직이 포함되어 있습니다.
+2.  **Vision-based Tracking (`test3.py`)**: 드론의 RGB 카메라 이미지를 입력으로 사용하며, **Siamese Network**를 통해 타겟의 위치를 추정하고 추적합니다.
 
-Tested on Intel x64/Ubuntu 22.04 and Apple Silicon/macOS 14.1.
+## 🛠️ Installation
 
-```sh
-git clone https://github.com/utiasDSL/gym-pybullet-drones.git
-cd gym-pybullet-drones/
+### 1\. 환경 설정
 
-conda create -n drones python=3.10
-conda activate drones
+Python 3.10 환경을 권장합니다.
 
-pip3 install --upgrade pip
-pip3 install -e . # if needed, `sudo apt install build-essential` to install `gcc` and build `pybullet`
-
+```bash
+conda create -n drone_tracking python=3.10
+conda activate drone_tracking
 ```
 
-## Use
+### 2\. Requirements
 
-### PID control examples
+이 프로젝트는 `gym-pybullet-drones` 라이브러리에 의존합니다.
 
-```sh
-cd gym_pybullet_drones/examples/
-python3 pid.py # position and velocity reference
-python3 pid_velocity.py # desired velocity reference
+**수동 설치**
+주요 의존성 패키지는 다음과 같습니다.
+
+```bash
+pip install gymnasium==0.29.1 pybullet==3.2.7 stable-baselines3==2.7.0 torch==2.8.0 opencv-python==4.10.0 numpy matplotlib
 ```
 
-### Downwash effect example
+추가적으로 `gym-pybullet-drones` 원본 리포지토리를 clone 후 설치해야 할 수 있습니다.
 
-```sh
-cd gym_pybullet_drones/examples/
-python3 downwash.py
+## 📂 Directory Structure
+
+실행을 위해 아래와 같은 폴더 구조와 모델 파일이 준비되어 있어야 합니다.
+
+```
+project_root/
+├── requirements.txt
+├── 2400best/                  # test2.py용 모델 폴더
+│   ├── best_model.zip
+│   └── final_vecnormalize.pkl (또는 vecnorm 파일들)
+├── results_learn3/            # test3.py용 모델 폴더
+│   ├── best_model.zip
+│   └── final_vecnormalize.pkl
+├── gym_pybullet_drones/       # 라이브러리 및 예제 코드
+│   └── examples/
+│       ├── test2.py           # State 기반 추적 실행 파일
+│       ├── test3.py           # Vision 기반 추적 실행 파일
+│       ├── BaselinePretrained.pth.tar  # Siamese Network 사전 학습 모델
+│       └── tracking_object.png         # 추적 템플릿 이미지
+└── ...
 ```
 
-### Reinforcement learning examples (SB3's PPO)
+## 🚀 Usage
 
-```sh
-cd gym_pybullet_drones/examples/
-python learn.py # task: single drone hover at z == 1.0
-python learn.py --multiagent true # task: 2-drone hover at z == 1.2 and 0.7
-LATEST_MODEL=$(ls -t results | head -n 1) && python play.py --model_path "results/${LATEST_MODEL}/best_model.zip" # play and visualize the most recent learned policy after training
+### 1\. State-based Tracking 실행
+
+상대 좌표를 기반으로 학습된 PPO 모델을 테스트합니다. FSM 로직이 포함되어 있어 타겟을 놓치면 제자리에서 회전하며 수색합니다.
+
+```bash
+# gym_pybullet_drones/examples 폴더 내에서 실행
+python test2.py
 ```
 
-<img src="gym_pybullet_drones/assets/rl.gif" alt="rl example" width="375"> <img src="gym_pybullet_drones/assets/marl.gif" alt="marl example" width="375">
+  * **모델 경로:** `./2400best/best_model.zip`
+  * **특징:** `moving_car_test` 환경 사용, `OBS_MODE="rel_pos"`
 
-### utiasDSL `pycffirmware` Python Bindings example (multiplatform, single-drone)
+### 2\. Vision-based Tracking (Siamese Network) 실행
 
-Install [`pycffirmware`](https://github.com/utiasDSL/pycffirmware?tab=readme-ov-file#installation) for Ubuntu, macOS, or Windows
+RGB 이미지를 입력으로 받아 Siamese Network가 타겟을 인식하고, PPO 에이전트가 이를 추적합니다. 실행 시 OpenCV 윈도우를 통해 드론의 시야와 인식된 Heatmap을 확인할 수 있습니다.
 
-```sh
-cd gym_pybullet_drones/examples/
-python3 cff-dsl.py
+```bash
+# gym_pybullet_drones/examples 폴더 내에서 실행
+python test3.py
 ```
 
-### Betaflight SITL example (Ubuntu only)
+  * **모델 경로:** `./results_learn3/best_model.zip`
+  * **Siamese 모델:** `BaselinePretrained.pth.tar`
+  * **특징:** OpenCV HUD 시각화 (Conf 점수, 속도 벡터 표시), `OBS_MODE="rgb"`
 
-```sh
-git clone https://github.com/betaflight/betaflight 
-cd betaflight/
-git checkout cafe727 # `master` branch head at the time of writing (future release 4.5)
-make arm_sdk_install # if needed, `apt install curl``
-make TARGET=SITL # comment out line: https://github.com/betaflight/betaflight/blob/master/src/main/main.c#L52
-cp ~/gym-pybullet-drones/gym_pybullet_drones/assets/eeprom.bin ~/betaflight/ # assuming both gym-pybullet-drones/ and betaflight/ were cloned in ~/
-betaflight/obj/main/betaflight_SITL.elf
-```
+## 📎 References
 
-In another terminal, run the example
-
-```sh
-conda activate drones
-cd gym_pybullet_drones/examples/
-python3 beta.py --num_drones 1 # check the steps in the file's docstrings to use multiple drones
-```
-
-## Citation
-
-If you wish, please cite our [IROS 2021 paper](https://arxiv.org/abs/2103.02142) ([and original codebase](https://github.com/utiasDSL/gym-pybullet-drones/tree/paper)) as
-
-```bibtex
-@INPROCEEDINGS{panerati2021learning,
-      title={Learning to Fly---a Gym Environment with PyBullet Physics for Reinforcement Learning of Multi-agent Quadcopter Control}, 
-      author={Jacopo Panerati and Hehui Zheng and SiQi Zhou and James Xu and Amanda Prorok and Angela P. Schoellig},
-      booktitle={2021 IEEE/RSJ International Conference on Intelligent Robots and Systems (IROS)},
-      year={2021},
-      volume={},
-      number={},
-      pages={7512-7519},
-      doi={10.1109/IROS51168.2021.9635857}
-}
-```
-
-## References
-
-- Carlos Luis and Jeroome Le Ny (2016) [*Design of a Trajectory Tracking Controller for a Nanoquadcopter*](https://arxiv.org/pdf/1608.05786.pdf)
-- Nathan Michael, Daniel Mellinger, Quentin Lindsey, Vijay Kumar (2010) [*The GRASP Multiple Micro UAV Testbed*](http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.169.1687&rep=rep1&type=pdf)
-- Benoit Landry (2014) [*Planning and Control for Quadrotor Flight through Cluttered Environments*](http://groups.csail.mit.edu/robotics-center/public_papers/Landry15)
-- Julian Forster (2015) [*System Identification of the Crazyflie 2.0 Nano Quadrocopter*](https://www.research-collection.ethz.ch/handle/20.500.11850/214143)
-- Antonin Raffin, Ashley Hill, Maximilian Ernestus, Adam Gleave, Anssi Kanervisto, and Noah Dormann (2019) [*Stable Baselines3*](https://github.com/DLR-RM/stable-baselines3)
-- Guanya Shi, Xichen Shi, Michael O’Connell, Rose Yu, Kamyar Azizzadenesheli, Animashree Anandkumar, Yisong Yue, and Soon-Jo Chung (2019)
-[*Neural Lander: Stable Drone Landing Control Using Learned Dynamics*](https://arxiv.org/pdf/1811.08027.pdf)
-- C. Karen Liu and Dan Negrut (2020) [*The Role of Physics-Based Simulators in Robotics*](https://www.annualreviews.org/doi/pdf/10.1146/annurev-control-072220-093055)
-- Yunlong Song, Selim Naji, Elia Kaufmann, Antonio Loquercio, and Davide Scaramuzza (2020) [*Flightmare: A Flexible Quadrotor Simulator*](https://arxiv.org/pdf/2009.00563.pdf)
-
-Run all tests from the top folder with
-
-```sh
-pytest tests/
-```
-
------
-> University of Toronto's [Dynamic Systems Lab](https://github.com/utiasDSL) / [Vector Institute](https://github.com/VectorInstitute) / University of Cambridge's [Prorok Lab](https://github.com/proroklab)
-
-<!--
-## WIP/Desired Contributions/PRs
-
-- [ ] Multi-drone `crazyflie-firmware` SITL support
-- [ ] Use SITL services with steppable simulation
-- [ ] Add motor delay, advanced ESC modeling by implementing a buffer in `BaseAviary._dynamics()`
-- [ ] Replace `rpy` with quaternions (and `ang_vel` with body rates) by editing `BaseAviary._updateAndStoreKinematicInformation()`, `BaseAviary._getDroneStateVector()`, and the `.computeObs()` methods of relevant subclasses
-
-## Troubleshooting
-
-- On Ubuntu, with an NVIDIA card, if you receive a "Failed to create and OpenGL context" message, launch `nvidia-settings` and under "PRIME Profiles" select "NVIDIA (Performance Mode)", reboot and try again.
--->
+  * **Base Environment:** [gym-pybullet-drones](https://github.com/utiasDSL/gym-pybullet-drones)
+  * **RL Algorithm:** [Stable-Baselines3 PPO](https://github.com/DLR-RM/stable-baselines3)

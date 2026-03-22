@@ -111,17 +111,6 @@ class MovingTargetWrapper(gym.Wrapper):
         self.max_z_fail = 5.0
         self.min_z_crash = 0.2    
         self.lost_steps = 0  # 타겟 놓친 시간 카운터
-        self.prev_dist_xy = None
-        self.w_closing = 15.0   # 거리 변화 보상 가중치 (w_dist=10 기준 절반 정도)
-
-        # --- Anchor(이상적인 드론 위치) 파라미터 ---
-        # 타겟 바로 위 2m 지점을 ideal point로 사용
-        self.anchor_rel_alt = 2.0  # [m], 타겟 기준 상대 고도
-        self.w_anchor = 10.0       # anchor 거리 보상 가중치 (기존 w_dist 대체)
-        self.anchor_sharpness = 1.5  # anchor 거리 보상 곡선의 뾰족함
-
-        self.prev_anchor_dist = None  # 이전 step에서 anchor까지 거리
-        self.w_anchor_closing = 10.0  # anchor에 가까워지는 정도에 대한 보상 가중치
         
         self.dt = self.env.unwrapped.CTRL_TIMESTEP
 
@@ -158,8 +147,8 @@ class MovingTargetWrapper(gym.Wrapper):
         self.x_max, self.y_max = x_max, y_max
         self.target_pos = np.array([0.0, 0.0, self.init_target_z])
         
-        self.min_speed = 0.05
-        self.max_speed = 0.3
+        self.min_speed = 0.3
+        self.max_speed = 1.0
         self.max_accel = 0.05
         self.max_turn_rate = 0.05
         
@@ -357,48 +346,12 @@ class MovingTargetWrapper(gym.Wrapper):
             rgb = self._render_rgb()
             obs = {"rgb": rgb, "rel_pos": full_obs_vector}
 
-        #거리 가까워짐, 멀어짐 가중치를 위해
-        dist_vec = np.array(target_pos) - np.array(drone_pos)
-        self.prev_dist_xy = float(np.linalg.norm(dist_vec[:2]))
-
-        # [추가] Anchor(타겟 위 2m 지점)까지의 3D 거리 초기화
-        anchor_pos = np.array(target_pos, dtype=np.float32)
-        anchor_pos[2] += self.anchor_rel_alt    # 타겟 위로 2m 지점
-
-        anchor_vec = anchor_pos - np.array(drone_pos, dtype=np.float32)
-        self.prev_anchor_dist = float(np.linalg.norm(anchor_vec))
-
         return obs, info
 
 
     def step(self, action):
         # 1. 하위 환경 실행 및 타겟 업데이트
-        # 원본 action을 수정하지 않도록 복사
-        modified_action = action.copy()
-        modified_action[..., 2] = 0.0   #z축 고정
-        obs_base, _, term_base, trunc_base, info = self.env.step(modified_action)
-        #obs_base, _, term_base, trunc_base, info = self.env.step(action)
-        # ---------------------------------------------------------------------
-        # [신규] 고도 침하 방지: 물리 엔진 강제 리셋 (God Mode)
-        # 드론이 움직이면서 조금씩 가라앉는 것을 막기 위해, 
-        # 매 스텝마다 강제로 높이(Z)를 2.0m로 돌려놓습니다.
-        # ---------------------------------------------------------------------
-        
-        # 현재 위치와 자세 가져오기
-        pos, orn = p.getBasePositionAndOrientation(self._drone_id, physicsClientId=self._client)
-        lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
-        
-        # 높이만 2.0으로 강제 보정 (나머지 X, Y는 물리 엔진 계산 결과 유지)
-        # 만약 초기 고도가 2.0이 아니었다면 self.init_target_z + alpha 등으로 조절
-        forced_pos = [pos[0], pos[1], 2.0] 
-        
-        # 수직 속도도 0으로 죽여버림 (관성 제거)
-        forced_lin_vel = [lin_vel[0], lin_vel[1], 0.0]
-
-        # 물리 엔진에 적용
-        p.resetBasePositionAndOrientation(self._drone_id, forced_pos, orn, physicsClientId=self._client)
-        p.resetBaseVelocity(self._drone_id, forced_lin_vel, ang_vel, physicsClientId=self._client)
-        # ---------------------------------------------------------------------
+        obs_base, _, term_base, trunc_base, info = self.env.step(action)
         self._update_target()
         
         
@@ -409,83 +362,36 @@ class MovingTargetWrapper(gym.Wrapper):
         rel_pos = np.array(target_pos) - np.array(drone_pos)
         lin_vel, ang_vel = p.getBaseVelocity(self._drone_id, physicsClientId=self._client)
 
-        # 타겟 속도 및 상대 속도 (보상 + 관측에서 모두 사용)
-        vx = self.speed * np.cos(self.angle)
-        vy = self.speed * np.sin(self.angle)
-        target_vel = np.array([vx, vy, 0.0], dtype=np.float32)
-        rel_vel = target_vel - np.array(lin_vel, dtype=np.float32)
-
         dist_vec = np.array(target_pos) - np.array(drone_pos)
         dist_3d = np.linalg.norm(dist_vec)
         dist_xy = np.linalg.norm(dist_vec[:2])
 
         # 3. 보상(Reward) 계산
+        reward = 0.0   #alive bonus
 
-        # -----------------------------
-        # (A) Anchor 기반 거리 보상
-        #   - Anchor = 타겟 위치 + (0,0, anchor_rel_alt)
-        #   - 드론이 Anchor에 가까울수록 높은 보상
-        # -----------------------------
-        reward = 0.0   # alive bonus
-
-        anchor_pos = np.array(target_pos, dtype=np.float32)
-        anchor_pos[2] += self.anchor_rel_alt   # 타겟 위 2m 지점
-
-        anchor_vec = anchor_pos - np.array(drone_pos, dtype=np.float32)
-        anchor_dist = float(np.linalg.norm(anchor_vec))
-
-        # (A-1) 절대 거리 보상: anchor_dist가 0에 가까울수록 최대
-        anchor_reward = np.exp(-self.anchor_sharpness * (anchor_dist ** 2))
-        reward += self.w_anchor * anchor_reward
-
-        # (A-2) 거리 변화 보상: Anchor에 가까워지면 추가 보상
-        if self.prev_anchor_dist is not None:
-            # 이전 step보다 Anchor와의 거리가 얼마나 줄었는지
-            dist_delta = self.prev_anchor_dist - anchor_dist  # 양수면 Anchor에 가까워짐
-
-            dist_delta_clipped = np.clip(dist_delta, -0.2, 0.2)
-            closing_bonus = self.w_anchor_closing * dist_delta_clipped
-            reward += closing_bonus
-
-        # (A-3) 선제 추적 보상 (anticipation bonus)
-        # 타겟 상대속도 방향으로 앞서가면 보상
-        rel_vel_xy = rel_vel[:2]
-        rel_pos_xy = rel_pos[:2]
-
-        vel_norm = np.linalg.norm(rel_vel_xy) + 1e-6
-        pos_norm = np.linalg.norm(rel_pos_xy) + 1e-6
-
-        dir_alignment = np.dot(rel_pos_xy, rel_vel_xy) / (pos_norm * vel_norm)
-        # dir_alignment ≈ cos(theta) ∈ [-1, 1]
-        anticipation_bonus = -2.0 * dir_alignment
-        reward += anticipation_bonus
-
-
-        # 다음 스텝을 위해 Anchor 거리 저장
-        self.prev_anchor_dist = anchor_dist
-
+        # (A) 거리 보상 (THE GOAL)
+        error = dist_xy - self.desired_dist
+        dist_reward = np.exp(-self.dist_sharpness * (error**2))
+        reward += self.w_dist * dist_reward
         
-
-        # ---------------------------------------------------------------------
-        # (B) 안정성 페널티 (THE COST) - "추적 중엔 좀 봐주자"
-        # ---------------------------------------------------------------------
+        # --- (B) 안정성 페널티 (THE COST) ---
         
-        # [핵심 수정] 페널티 스케일링
-        penalty_scale = 0.05 + 0.45 * max(0.0, min(1.0, 1.0 - dist_xy / 1.0))
-        
-        # (B-1) 물리적 흔들림 (각속도) 페널티
+        # (B-1) 물리적 흔들림 (각속도) 페널티 (부드러운 제곱 사용)
         ang_vel_norm = np.linalg.norm(ang_vel)
-        reward -= penalty_scale * self.w_ang_vel * (ang_vel_norm**2) 
+        reward -= self.w_ang_vel * (ang_vel_norm**2) # 제곱 페널티
 
-        # (B-2) 명령 흔들림 (행동 변화율) 페널티
+        # (B-2) 명령 흔들림 (행동 변화율) 페널티 (부드러운 제곱 사용)
         action_diff = action - self.prev_action
         action_rate_norm = np.linalg.norm(action_diff)
-        reward -= penalty_scale * self.w_action_rate * (action_rate_norm**2) 
+        reward -= self.w_action_rate * (action_rate_norm**2) # 제곱 페널티
 
         # (C) "바닥 접근" 페널티 (Lava Floor)
         # 0.2m(충돌)에 가까워질수록 페널티가 지수적으로 증가합니다.
+        # (drone_pos[2]가 1.0m 근처면 페널티가 매우 작아짐)
         crash_proximity = drone_pos[2] - self.min_z_crash
         if crash_proximity < 1.0: # 1.2m 고도 아래로 내려오면 페널티 시작
+            # np.exp(-5.0 * 0.0) == 1.0 (최대 페널티)
+            # np.exp(-5.0 * 1.0) == 0.006 (거의 0)
             crash_prox_penalty = np.exp(-5.0 * crash_proximity)
             reward -= self.w_crash_avoid * crash_prox_penalty
         
@@ -498,41 +404,14 @@ class MovingTargetWrapper(gym.Wrapper):
         drone_down_vector = np.array([0.0, 0.0, -1.0])
         drone_to_target_vector = rel_pos # (rel_pos = dist_vec)
         
-        
         reacq_angle_deg = 0.0 # (정확히 아래 있을 때)
+        
         if dist_3d > 1e-6:
             dot_product = -drone_to_target_vector[2] # (0,0,-1) . (x,y,z) = -z
             cos_theta = np.clip(dot_product / dist_3d, -1.0, 1.0)
             reacq_angle_deg = np.degrees(np.arccos(cos_theta))
 
         fail_angle = (reacq_angle_deg > self.CAMERA_FOV_THRESHOLD)
-
-        # ---------------------------------------------------------------------
-        # 각도 기반 FOV 중앙 유지 보너스
-        #  - reacq_angle_deg : 카메라 중심(아래 방향)과 타겟 방향 사이의 각도 [deg]
-        #  - CAMERA_FOV_THRESHOLD : 시야 이탈 기준 각도 (예: 45도)
-        #  - 목표 : 각도가 0도(완전 중앙)일수록 보상을 많이 주고,
-        #           경계(45도)에 가까워질수록 보상을 줄인다.
-        # ---------------------------------------------------------------------
-        
-
-        # 1) 각도 0도(중앙) ~ FOV 경계(예: 45도)를 0~1 범위로 정규화
-        #    - 0.0  : 완전 중앙
-        #    - 1.0  : FOV 경계 이상
-        angle_norm = np.clip(reacq_angle_deg / self.CAMERA_FOV_THRESHOLD, 0.0, 1.0)
-
-        # 2) 중앙에 가까울수록 1.0, 경계에 가까울수록 0.0이 되도록 뒤집기
-        #    - center_factor = 1.0 : 완전 중앙
-        #    - center_factor = 0.0 : FOV 경계 근처 또는 바깥
-        center_factor = 1.0 - angle_norm
-        # 3) 중앙 유지 보상 계산
-        #    - w_center : 중앙 유지 보상의 최대 크기
-        #                 (w_dist=10 기준으로 0~3 정도에서 시작 추천)
-        w_center = 3.0
-        center_bonus = w_center * center_factor
-
-        reward += center_bonus
-
 
         #고도 기반 실패
         fail_z_limit = (drone_pos[2] > self.max_z_fail)
@@ -558,7 +437,7 @@ class MovingTargetWrapper(gym.Wrapper):
             self.lost_steps += 1
             if self.is_test_mode:
                 # [테스트 모드]: 신호를 보내고 종료하지 않음
-                terminated = True
+                terminated = False
                 info['status'] = 'TARGET_LOST'
                 reward -= 10.0 # (타겟을 놓친 것에 대한 가벼운 페널티)
                 term_reason = "angle_lost_test"
@@ -584,6 +463,12 @@ class MovingTargetWrapper(gym.Wrapper):
 
         # 5. 관측(Observation) 정보 구성 및 반환
         rel_pos = dist_vec
+        # 타겟 속도 (speed/angle은 바로 위에서 _update_target() 호출로 최신 값)
+        vx = self.speed * np.cos(self.angle)
+        vy = self.speed * np.sin(self.angle)
+        target_vel = np.array([vx, vy, 0.0], dtype=np.float32)
+        # 상대 속도 = 타겟 - 드론
+        rel_vel = target_vel - np.array(lin_vel, dtype=np.float32)
 
         #드론의 RPY 각도 계산
         rpy = p.getEulerFromQuaternion(drone_orn)

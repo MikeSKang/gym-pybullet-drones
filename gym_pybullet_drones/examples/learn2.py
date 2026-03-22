@@ -157,9 +157,9 @@ if __name__ == "__main__":
       name_prefix="ppo_backup", # (결과: ppo_backup_10000_steps.zip)
       save_vecnormalize=True   # (중요!) VecNormalize 사용 유무
     )
-    # 3. (추가) "최신" 통계를 스텝마다 저장하는 콜백 생성(CheckpointCallback가 대체하므로 주석처리)
+    # 3. "최신" 통계를 스텝마다 저장하는 콜백 생성(CheckpointCallback가 대체하므로 주석처리)
     #periodic_save_cb = PeriodicVecNormalizeSave(save_path=latest_vecnorm_path, freq=100000)
-    # 4. (수정) callback 리스트에 두 콜백을 모두 전달
+    # 4. callback 리스트에 두 콜백을 모두 전달
     termination_stats_cb = TerminationStatsCallback()
 
     callback_list = [eval_callback, checkpoint_callback, termination_stats_cb]
