@@ -1,89 +1,74 @@
+Vision-Based Dynamic Target Tracking System for UAVs 🚁
 
-# Tracking Drone Project 🚁
+📌 Overview
 
-이 프로젝트는 [gym-pybullet-drones](https://github.com/utiasDSL/gym-pybullet-drones) 환경을 기반으로 강화학습(PPO)을 사용하여 드론이 목표물을 추적(Tracking)하도록 훈련하고 테스트하는 프로젝트입니다.
+This repository entails the implementation of an Autonomous UAV Tracking System designed to track a dynamically moving Unmanned Ground Vehicle (UGV) exclusively utilizing onboard vision data within a physics-based simulation. To surmount the limitations of conventional discrete control, we adopted a continuous control framework utilizing Proximal Policy Optimization (PPO). Furthermore, we explored the feasibility of autonomous navigation in GPS-denied environments through a modular architecture incorporating Siamese Networks.
 
-## 📌 주요 기능
+🚀 Research Methodology & Two-Phase Approach
 
-프로젝트는 크게 두 가지 테스트 모드를 제공합니다:
+This project was systematically conducted in two discrete phases, progressing from empirical validation to realistic vision-based implementation.
 
-1.  **State-based Tracking (`test2.py`)**: 드론과 타겟의 Relative Position 정보를 직접 받아 추적합니다. FSM(Finite State Machine)을 통해 놓쳤을 때 수색(Searching) 모드로 전환하는 로직이 포함되어 있습니다.
-2.  **Vision-based Tracking (`test3.py`)**: 드론의 RGB 카메라 이미지를 입력으로 사용하며, **Siamese Network**를 통해 타겟의 위치를 추정하고 추적합니다.
+Phase 1: Coordinate-Based Tracking Validation (learn2.py, test2.py)
 
-## 🛠️ Installation
+This phase focuses on verifying whether the reinforcement learning algorithm can acquire a stable control policy in a highly realistic physics engine.
 
-### 1\. 환경 설정
+Approach: The agent is trained using the absolute coordinates (Ground Truth) of the target.
 
-Python 3.10 환경을 권장합니다.
+Objective: To secure smooth flight trajectories via a continuous action space and verify the convergence of the algorithm.
 
-```bash
-conda create -n drone_tracking python=3.10
-conda activate drone_tracking
-```
+Result: Achieved a tracking success rate of approximately 96.5%, substantiating the efficacy of the PPO algorithm in a physics-based environment.
 
-### 2\. Requirements
+Phase 2: Vision-Based Modular Tracking (learn3.py, test3.py)
 
-이 프로젝트는 `gym-pybullet-drones` 라이브러리에 의존합니다.
+In this final phase, absolute coordinate inputs were eliminated to enable target tracking relying solely on the UAV's onboard RGB camera, simulating real-world constraints.
 
-**수동 설치**
-주요 의존성 패키지는 다음과 같습니다.
+Perception: A Siamese Network analyzes the RGB images to compute the relative coordinates of the target in real-time.
 
-```bash
-pip install gymnasium==0.29.1 pybullet==3.2.7 stable-baselines3==2.7.0 torch==2.8.0 opencv-python==4.10.0 numpy matplotlib
-```
+Control: Based on the estimated coordinates, the PPO agent deduces and outputs optimal velocity commands.
 
-추가적으로 `gym-pybullet-drones` 원본 리포지토리를 clone 후 설치해야 할 수 있습니다.
+Hybrid Strategy: To mitigate 'Target Lost' scenarios where the target escapes the camera's Field of View (FOV), we integrated a heuristic, rule-based searching mechanism, thereby enhancing the overall robustness of the system.
 
-## 📂 Directory Structure
+🧠 System Architecture
 
-실행을 위해 아래와 같은 폴더 구조와 모델 파일이 준비되어 있어야 합니다.
+1. Control Module (Reinforcement Learning)
 
-```
-project_root/
-├── requirements.txt
-├── 2400best/                  # test2.py용 모델 폴더
-│   ├── best_model.zip
-│   └── final_vecnormalize.pkl (또는 vecnorm 파일들)
-├── results_learn3/            # test3.py용 모델 폴더
-│   ├── best_model.zip
-│   └── final_vecnormalize.pkl
-├── gym_pybullet_drones/       # 라이브러리 및 예제 코드
-│   └── examples/
-│       ├── test2.py           # State 기반 추적 실행 파일
-│       ├── test3.py           # Vision 기반 추적 실행 파일
-│       ├── BaselinePretrained.pth.tar  # Siamese Network 사전 학습 모델
-│       └── tracking_object.png         # 추적 템플릿 이미지
-└── ...
-```
+Algorithm: PPO via Stable-Baselines3.
 
-## 🚀 Usage
+State Space (16D Vector): Incorporates relative position, relative velocity, the UAV's angular velocity and attitude (RPY), alongside the previous action vector.
 
-### 1\. State-based Tracking 실행
+Action Space (4D Continuous): Velocity commands spanning $(v_x, v_y, v_z, \omega_z)$.
 
-상대 좌표를 기반으로 학습된 PPO 모델을 테스트합니다. FSM 로직이 포함되어 있어 타겟을 놓치면 제자리에서 회전하며 수색합니다.
+Reward Function: Comprises a distance maintenance reward (Exponential Kernel) and imposes stringent penalties for angular instability, abrupt control shifts, and ground proximity.
 
-```bash
-# gym_pybullet_drones/examples 폴더 내에서 실행
-python test2.py
-```
+2. Vision Module (Siamese Networks)
 
-  * **모델 경로:** `./2400best/best_model.zip`
-  * **특징:** `moving_car_test` 환경 사용, `OBS_MODE="rel_pos"`
+Model: SiamFC-based architecture.
 
-### 2\. Vision-based Tracking (Siamese Network) 실행
+Features: Utilizes a pre-trained model for zero-shot target discrimination, demonstrating robust detection capabilities even in environments with unseen textures and visual distractors.
 
-RGB 이미지를 입력으로 받아 Siamese Network가 타겟을 인식하고, PPO 에이전트가 이를 추적합니다. 실행 시 OpenCV 윈도우를 통해 드론의 시야와 인식된 Heatmap을 확인할 수 있습니다.
+📂 Project Structure
 
-```bash
-# gym_pybullet_drones/examples 폴더 내에서 실행
-python test3.py
-```
+📦 gym-pybullet-drones
+ ┣ 📂 2400best                 # Core training and evaluation scripts
+ ┃ ┣ 📜 learn2.py / test2.py   # [Phase 1] Ground Truth-based training/eval
+ ┃ ┗ 📜 learn3.py / test3.py   # [Phase 2] Vision-based training/eval
+ ┣ 📂 gym_pybullet_drones      # Core physics engine and custom environment wrappers
+ ┃ ┗ 📂 envs/HoverAviary.py    # Base UAV environment definitions
+ ┗ 📜 README.md
 
-  * **모델 경로:** `./results_learn3/best_model.zip`
-  * **Siamese 모델:** `BaselinePretrained.pth.tar`
-  * **특징:** OpenCV HUD 시각화 (Conf 점수, 속도 벡터 표시), `OBS_MODE="rgb"`
 
-## 📎 References
+📊 Results & Discussion (Lessons Learned)
 
-  * **Base Environment:** [gym-pybullet-drones](https://github.com/utiasDSL/gym-pybullet-drones)
-  * **RL Algorithm:** [Stable-Baselines3 PPO](https://github.com/DLR-RM/stable-baselines3)
+During Phase 2, the integration of the Vision Module yielded a tracking success rate ranging from 68.5% to 83.5% (with Hybrid Control). This marginal decline from Phase 1 elucidated several crucial academic insights:
+
+Information Accuracy vs. Realism: We observed a distinct trade-off between the precision of Ground Truth data and the uncertainties inherent in vision-based estimation. Bridging this gap is an indispensable step for real-world (Sim-to-Real) deployment.
+
+Impact of Vision Noise: The minute fluctuations (vision noise) in the coordinates estimated by the Siamese Network significantly impeded the control policy. This underscores the necessity of signal stabilization techniques, such as a Kalman Filter, for future iterations.
+
+Efficacy of Hybrid Control: Supplementing the pure reinforcement learning agent with a classical search algorithm effectively resolved the 'Target Lost' predicament, proving that combining RL with heuristic approaches substantially bolsters system resilience.
+
+👥 Contributors
+
+Hwang Chan-hong: Vision Module design (Siamese Network) and perception-control pipeline integration.
+
+Kang Seung-hyun: Control Module design (PPO), reward function formulation, and Hybrid Control Strategy implementation.
