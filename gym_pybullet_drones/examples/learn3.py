@@ -378,7 +378,7 @@ if __name__ == "__main__":
             env=train_env,
             device=DEVICE, # 기존 코드에 cpu로 되어있던데, 가급적 cuda(DEVICE) 추천
             batch_size=1024,
-            n_steps=256,
+            n_steps=1024,
             n_epochs=10,
             custom_objects={
                 "learning_rate": 1e-4,
@@ -394,8 +394,8 @@ if __name__ == "__main__":
             train_env,
             verbose=1,
             tensorboard_log=os.path.join(OUTPUT_FOLDER, "tb_logs"),
-            learning_rate=1e-4,
-            n_steps=1024,
+            learning_rate=5e-4,
+            n_steps=256,
             batch_size=1024,
             gamma=0.99,
             gae_lambda=0.95,
