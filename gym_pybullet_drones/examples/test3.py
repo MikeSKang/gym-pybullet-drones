@@ -43,10 +43,10 @@ class VisualizingSiameseWrapper(SiameseTrainingWrapper):
         }
         
         # 필터 파라미터 튜닝
-        # alpha가 작을수록 반응은 느려지지만 부드움
+        # alpha가 작을수록 반응은 느려지지만 부드러워집니다. (기존 값보다 낮게 설정 추천: 0.1 ~ 0.3)
         self.alpha = 0.3
         
-        #좌표 스무딩용 변수 추가
+        # 좌표 스무딩용 변수 추가
         self.prev_sx = None
         self.prev_sy = None
 
@@ -149,7 +149,6 @@ class VisualizingSiameseWrapper(SiameseTrainingWrapper):
         raw_vel = (current_rel_pos - self.prev_rel_pos) / self.dt
         self.filtered_rel_vel = (self.alpha * raw_vel) + ((1 - self.alpha) * self.filtered_rel_vel)
         
-        #신뢰도가 너무 낮으면(타겟이 아님) 0으로 설정(deadzone)
         if conf < 2.5: # 2.5 or 3.0
             final_vel = np.zeros(3, dtype=np.float32)
         else:
@@ -180,7 +179,7 @@ def draw_velocity_arrow(img, rel_vel, scale=50):
     """
     img: 카메라 이미지 프레임 (numpy array)
     rel_vel: 상대 속도 벡터 (예: [vx, vy, vz])
-    scale: 속도 값을 픽셀 길이로 변환할 배율
+    scale: 속도 값을 픽셀 길이로 변환할 배율 (속도가 작으면 값을 키우세요)
     """
     h, w = img.shape[:2]
     center_x, center_y = w // 2, h // 2
@@ -217,14 +216,14 @@ def draw_4way_hud(img, rel_vel_world, drone_yaw, conf_score):
     center_x, center_y = w // 2, h // 2
     
     # ---------------------------------------------------------
-    # 1. 좌표 변환
+    # 1. 좌표 변환 (기존 동일)
     # ---------------------------------------------------------
     vx_world, vy_world = rel_vel_world[0], rel_vel_world[1]
     vel_forward = vx_world * np.cos(drone_yaw) + vy_world * np.sin(drone_yaw)
     vel_right = -vx_world * np.sin(drone_yaw) + vy_world * np.cos(drone_yaw)
 
     # ---------------------------------------------------------
-    # 2. 4방향 바 그리기
+    # 2. 4방향 바 그리기 (기존 동일)
     # ---------------------------------------------------------
     scale = 30.0; max_len = 100; bar_width = 10; gap = 20
     
